@@ -1,0 +1,212 @@
+[
+  {
+    "employee": "Person 1",
+    "last_month_shift": "Morning",
+    "client": [
+      "Client A",
+      "Client B",
+      "Client C",
+      "Client D"
+    ]
+  },
+  {
+    "employee": "Person 2",
+    "last_month_shift": "Afternoon",
+    "client": [
+      "Client E",
+      "Client F",
+      "Client A"
+    ]
+  },
+  {
+    "employee": "Person 3",
+    "last_month_shift": "Evening",
+    "client": [
+      "Client B",
+      "Client C",
+      "Client D"
+    ]
+  },
+  {
+    "employee": "Person 4",
+    "last_month_shift": "Night",
+    "client": [
+      "Client E",
+      "Client F"
+    ]
+  },
+  {
+    "employee": "Person 5",
+    "last_month_shift": "Morning",
+    "client": [
+      "Client A",
+      "Client B",
+      "Client C"
+    ]
+  },
+  {
+    "employee": "Person 6",
+    "last_month_shift": "Afternoon",
+    "client": [
+      "Client D",
+      "Client E",
+      "Client F",
+      "Client A"
+    ]
+  },
+  {
+    "employee": "Person 7",
+    "last_month_shift": "Evening",
+    "client": [
+      "Client B",
+      "Client C",
+      "Client D"
+    ]
+  },
+  {
+    "employee": "Person 8",
+    "last_month_shift": "Night",
+    "client": [
+      "Client E",
+      "Client F",
+      "Client A"
+    ]
+  },
+  {
+    "employee": "Person 9",
+    "last_month_shift": "Morning",
+    "client": [
+      "Client B",
+      "Client C",
+      "Client D"
+    ]
+  },
+  {
+    "employee": "Person 10",
+    "last_month_shift": "Afternoon",
+    "client": [
+      "Client E",
+      "Client F",
+      "Client A"
+    ]
+  },
+  {
+    "employee": "Person 11",
+    "last_month_shift": "Evening",
+    "client": [
+      "Client B",
+      "Client C",
+      "Client D",
+      "Client E"
+    ]
+  },
+  {
+    "employee": "Person 12",
+    "last_month_shift": "Night",
+    "client": [
+      "Client F",
+      "Client A",
+      "Client B"
+    ]
+  },
+  {
+    "employee": "Person 13",
+    "last_month_shift": "Morning",
+    "client": [
+      "Client C",
+      "Client D",
+      "Client E"
+    ]
+  },
+  {
+    "employee": "Person 14",
+    "last_month_shift": "Afternoon",
+    "client": [
+      "Client F",
+      "Client A",
+      "Client B"
+    ]
+  },
+  {
+    "employee": "Person 15",
+    "last_month_shift": "Evening",
+    "client": [
+      "Client C",
+      "Client D",
+      "Client E"
+    ]
+  },
+  {
+    "employee": "Person 16",
+    "last_month_shift": "Night",
+    "client": [
+      "Client F",
+      "Client A",
+      "Client B",
+      "Client C"
+    ]
+  },
+  {
+    "employee": "Person 17",
+    "last_month_shift": "Morning",
+    "client": [
+      "Client D",
+      "Client E",
+      "Client F"
+    ]
+  },
+  {
+    "employee": "Person 18",
+    "last_month_shift": "Afternoon",
+    "client": [
+      "Client A",
+      "Client B"
+    ]
+  },
+  {
+    "employee": "Person 19",
+    "last_month_shift": "Evening",
+    "client": [
+      "Client C",
+      "Client D",
+      "Client E"
+    ]
+  },
+  {
+    "employee": "Person 20",
+    "last_month_shift": "Night",
+    "client": [
+      "Client F",
+      "Client A",
+      "Client B"
+    ]
+  },
+  {
+    "employee": "Person 21",
+    "last_month_shift": "Morning",
+    "client": [
+      "Client C",
+      "Client D",
+      "Client E",
+      "Client F"
+    ]
+  },
+  {
+    "employee": "Person 22",
+    "last_month_shift": "Afternoon",
+    "client": [
+      "Client A",
+      "Client B",
+      "Client C"
+    ]
+  },
+  {
+    "employee": "Person 23",
+    "last_month_shift": "Evening",
+    "client": [
+      "Client D",
+      "Client E",
+      "Client F"
+    ]
+  }
+]

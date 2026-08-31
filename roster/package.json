@@ -1,0 +1,14 @@
+{
+  "name": "monthly-roster",
+  "version": "1.0.0",
+  "description": "Monthly shift roster generator with week-off staggering and Excel export (no dependencies)",
+  "main": "index.js",
+  "bin": { "monthly-roster": "cli.js" },
+  "scripts": {
+    "start": "node cli.js --month 2025-07 --print",
+    "test": "node test/run-tests.js"
+  },
+  "engines": { "node": ">=14" },
+  "license": "MIT",
+  "private": true
+}
