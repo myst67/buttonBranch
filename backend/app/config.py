@@ -1,6 +1,7 @@
 """Scheduling rules and tunables, in one place."""
 from __future__ import annotations
 
+import os
 from pathlib import Path
 
 SHIFTS = ["Morning", "Afternoon", "Evening", "Night"]
@@ -40,7 +41,11 @@ SHIFT_SYNONYMS = {
     "s4": "Night", "shift 4": "Night", "graveyard": "Night",
 }
 
-DATA_DIR = Path(__file__).resolve().parent.parent / "data"
+#: Where uploaded history, the trained model and generated workbooks are kept.
+#: Point ROSTER_DATA_DIR somewhere outside the repo to keep state across
+#: re-clones, or on a backed-up volume.
+DATA_DIR = Path(os.environ.get("ROSTER_DATA_DIR")
+                or Path(__file__).resolve().parent.parent / "data")
 HISTORY_DIR = DATA_DIR / "history"
 MODEL_DIR = DATA_DIR / "models"
 EXPORT_DIR = DATA_DIR / "exports"

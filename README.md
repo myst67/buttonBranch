@@ -10,6 +10,10 @@ roster, rule-checked and in Excel.
 
 ## Run it
 
+**Setting this up on your own machine? See [DEPLOYMENT.md](DEPLOYMENT.md)** for
+the full from-scratch guide - prerequisites, both run modes, running it as a
+service, configuration, backups and troubleshooting. The short version:
+
 ```bash
 # 1. backend
 python -m venv .venv && source .venv/bin/activate

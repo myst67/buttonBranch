@@ -4,7 +4,7 @@ Learns from the rosters you upload and builds the next month under hard rules.
 
 ```bash
 python -m venv .venv && source .venv/bin/activate
-pip install -r backend/requirements.txt
+pip install -r backend/requirements-dev.txt   # runtime deps + pytest
 
 cd backend
 uvicorn app.main:app --reload --port 8000     # http://localhost:8000/docs

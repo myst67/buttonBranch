@@ -1,0 +1,5 @@
+# Everything needed to run the test suite and the linter.
+-r requirements.txt
+pytest>=7.4
+httpx>=0.26                  # FastAPI's TestClient
+pyflakes>=3.0

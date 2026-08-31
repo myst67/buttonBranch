@@ -1,10 +1,9 @@
+# Runtime dependencies. Tested versions are in the deployment guide.
 fastapi>=0.110
 uvicorn[standard]>=0.27
-python-multipart>=0.0.9
-pandas>=2.0
-scikit-learn>=1.3
-joblib>=1.3
-openpyxl>=3.1
-ortools>=9.7
-pytest>=7.4
-httpx>=0.26
+python-multipart>=0.0.9      # multipart form parsing for the upload endpoint
+pandas>=2.0                  # reads the uploaded .xlsx / .csv
+openpyxl>=3.1                # reads and writes the workbooks
+scikit-learn>=1.3            # the two preference rankers
+joblib>=1.3                  # persists the trained model between restarts
+ortools>=9.7                 # CP-SAT: the constraint solver that enforces the rules

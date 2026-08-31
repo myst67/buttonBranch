@@ -9,6 +9,7 @@ Flow the UI follows:
 """
 from __future__ import annotations
 
+import os
 from pathlib import Path
 from typing import Optional
 
@@ -25,9 +26,17 @@ from .solver import InfeasibleRoster
 app = FastAPI(title="Roster builder", version="1.0.0",
               description="Learns from last month's roster and builds the next one.")
 
+#: Only needed while the UI runs on its own dev server. Served from this app
+#: (the production path) it is same-origin and CORS never comes into it.
+#: Override with ROSTER_CORS_ORIGINS="http://localhost:4300,http://192.168.1.5:4200".
+CORS_ORIGINS = [origin.strip() for origin
+                in os.environ.get("ROSTER_CORS_ORIGINS",
+                                  "http://localhost:4200,http://127.0.0.1:4200").split(",")
+                if origin.strip()]
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:4200", "http://127.0.0.1:4200"],
+    allow_origins=CORS_ORIGINS,
     allow_methods=["*"],
     allow_headers=["*"],
 )
