@@ -1,1 +1,78 @@
-/* You can add global styles to this file, and also import other style files */
+/* Shared theme. Component styles reference these variables. */
+:root {
+  --bg: #f5f6f8;
+  --surface: #ffffff;
+  --surface-2: #fafbfc;
+  --text: #1c2530;
+  --muted: #6b7683;
+  --line: #dde1e6;
+  --line-soft: #edf0f3;
+  --head: #1f3864;
+  --head-weekend: #2c4a7c;
+  --accent: #2f5fd0;
+  --accent-soft: #e8eefc;
+  --ok: #1f7a44;
+  --ok-soft: #e6f4ec;
+  --warn: #9a5b12;
+  --warn-soft: #fdf0dd;
+  --error: #b3261e;
+  --error-soft: #fdeceb;
+  --mono: "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace;
+}
+
+* { box-sizing: border-box; }
+
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--text);
+  font: 14px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+}
+
+.wrap { max-width: 1220px; margin: 0 auto; padding: 0 22px; }
+
+.panel {
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  padding: 18px 20px 20px;
+}
+.panel-head h2 { margin: 0 0 4px; font-size: 16px; display: flex; align-items: center; gap: 8px; }
+.panel-head .hint, .hint { color: var(--muted); font-size: 12.5px; margin: 0 0 14px; max-width: 88ch; }
+.step {
+  display: inline-flex; align-items: center; justify-content: center;
+  width: 22px; height: 22px; border-radius: 50%;
+  background: var(--accent-soft); color: var(--accent); font-size: 12px; font-weight: 700;
+}
+
+input[type="text"], input[type="number"] {
+  border: 1px solid var(--line); border-radius: 6px; padding: 7px 10px;
+  font: inherit; font-size: 13px; background: var(--surface);
+}
+input:focus { outline: 2px solid var(--accent-soft); border-color: var(--accent); }
+
+.button {
+  display: inline-block; border: 1px solid var(--line); background: var(--surface);
+  border-radius: 7px; padding: 8px 14px; font-size: 13px; font-weight: 600;
+  color: var(--text); cursor: pointer; text-decoration: none;
+}
+.button:hover { border-color: var(--accent); color: var(--accent); }
+.button.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+.button.primary:hover { background: #2850b4; color: #fff; }
+.button.large { padding: 10px 20px; }
+.button[disabled] { opacity: .5; cursor: not-allowed; }
+.link { background: none; border: none; color: var(--accent); cursor: pointer;
+  font-size: 12px; text-decoration: underline; padding: 0; }
+
+.alert { border-radius: 8px; padding: 10px 12px; font-size: 13px; margin: 12px 0 0; }
+.alert ul { margin: 6px 0 0 18px; padding: 0; }
+.alert.ok { background: var(--ok-soft); color: var(--ok); }
+.alert.error { background: var(--error-soft); color: var(--error); }
+
+.muted { color: var(--muted); }
+.pill { display: inline-block; border-radius: 999px; padding: 1px 9px; font-size: 11.5px;
+  font-weight: 600; }
+.pill.Morning { background: #FFF2CC; color: #7a5b00; }
+.pill.Afternoon { background: #FCE4D6; color: #8a3d12; }
+.pill.Evening { background: #E2EFDA; color: #2f6b34; }
+.pill.Night { background: #DDEBF7; color: #1f4a7a; }

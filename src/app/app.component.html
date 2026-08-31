@@ -1,20 +1,59 @@
-<!--The content below is only a placeholder and can be replaced.-->
-<div style="text-align:center">
-  <h1>
-    Welcome to {{ title }}!
-  </h1>
-  <img width="300" alt="Angular Logo" src="data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCAyNTAgMjUwIj4KICAgIDxwYXRoIGZpbGw9IiNERDAwMzEiIGQ9Ik0xMjUgMzBMMzEuOSA2My4ybDE0LjIgMTIzLjFMMTI1IDIzMGw3OC45LTQzLjcgMTQuMi0xMjMuMXoiIC8+CiAgICA8cGF0aCBmaWxsPSIjQzMwMDJGIiBkPSJNMTI1IDMwdjIyLjItLjFWMjMwbDc4LjktNDMuNyAxNC4yLTEyMy4xTDEyNSAzMHoiIC8+CiAgICA8cGF0aCAgZmlsbD0iI0ZGRkZGRiIgZD0iTTEyNSA1Mi4xTDY2LjggMTgyLjZoMjEuN2wxMS43LTI5LjJoNDkuNGwxMS43IDI5LjJIMTgzTDEyNSA1Mi4xem0xNyA4My4zaC0zNGwxNy00MC45IDE3IDQwLjl6IiAvPgogIDwvc3ZnPg==">
-</div>
-<h2>Here are some links to help you start: </h2>
-<ul>
-  <li>
-    <h2><a target="_blank" rel="noopener" href="https://angular.io/tutorial">Tour of Heroes</a></h2>
-  </li>
-  <li>
-    <h2><a target="_blank" rel="noopener" href="https://github.com/angular/angular-cli/wiki">CLI Documentation</a></h2>
-  </li>
-  <li>
-    <h2><a target="_blank" rel="noopener" href="https://blog.angular.io/">Angular blog</a></h2>
-  </li>
-</ul>
+<header class="masthead">
+  <div class="wrap">
+    <h1>Monthly roster builder</h1>
+    <p>Upload last month's roster on the last day of the month. The model learns how this team
+      rotates; the optimiser builds the new month so every rule holds.</p>
+  </div>
+</header>
 
+<main class="wrap">
+  <app-upload-panel
+    [result]="uploadResult" [history]="history" [busy]="uploading" [error]="uploadError"
+    (upload)="onUpload($event)" (remove)="onRemoveMonth($event)"></app-upload-panel>
+
+  <app-model-panel [training]="training"></app-model-panel>
+
+  <div class="panel">
+    <div class="panel-head">
+      <h2><span class="step">3</span> Build the month</h2>
+      <p class="hint">The optimiser maximises the learned preference scores subject to every
+        rule: one shift per person for the whole month and never last month's, 3 week-offs and
+        4 working days for Night (2 and 5 for the rest) in one consecutive block, and every
+        client staffed in every shift on every day.</p>
+    </div>
+
+    <div class="controls">
+      <div class="field">
+        <label for="month">Month to build</label>
+        <input id="month" name="month" type="text" placeholder="2025-07" [(ngModel)]="options.month">
+      </div>
+      <div class="field">
+        <label for="seed">Seed</label>
+        <input id="seed" name="seed" type="number" [(ngModel)]="options.seed">
+      </div>
+      <div class="field">
+        <label for="minPer">Min per client &amp; shift</label>
+        <input id="minPer" name="minPer" type="number" min="1"
+               [(ngModel)]="options.min_per_client_shift">
+      </div>
+      <div class="field">
+        <label for="slack">Shift balance slack</label>
+        <input id="slack" name="slack" type="number" min="0" [(ngModel)]="options.balance_slack">
+      </div>
+      <div class="field">
+        <label for="limit">Time limit (s)</label>
+        <input id="limit" name="limit" type="number" min="1" [(ngModel)]="options.time_limit_seconds">
+      </div>
+      <button type="button" class="button primary large" (click)="generate()" [disabled]="!canGenerate">
+        {{ generating ? 'Solving...' : 'Generate roster' }}
+      </button>
+    </div>
+
+    <div class="alert error" *ngIf="generateError">
+      {{ generateError }}
+      <ul *ngIf="generateReasons.length"><li *ngFor="let reason of generateReasons">{{ reason }}</li></ul>
+    </div>
+  </div>
+
+  <app-roster-table [roster]="roster"></app-roster-table>
+</main>

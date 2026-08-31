@@ -1,0 +1,10 @@
+.masthead { background: var(--head); color: #fff; padding: 26px 0 22px; }
+.masthead h1 { margin: 0; font-size: 22px; letter-spacing: -.01em; }
+.masthead p { margin: 6px 0 0; opacity: .8; font-size: 13px; max-width: 70ch; }
+
+main { padding: 22px 0 60px; display: flex; flex-direction: column; gap: 18px; }
+
+.controls { display: flex; flex-wrap: wrap; gap: 14px; align-items: flex-end; }
+.controls .field label { display: block; font-weight: 600; font-size: 12px; margin-bottom: 4px;
+  color: var(--muted); }
+.controls .field input { width: 130px; }

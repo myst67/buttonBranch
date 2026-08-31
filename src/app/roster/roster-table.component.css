@@ -1,0 +1,51 @@
+.result-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; }
+.downloads { display: flex; gap: 8px; flex-shrink: 0; }
+
+.stats { display: flex; flex-wrap: wrap; gap: 10px; margin: 14px 0; }
+.stat { display: flex; align-items: baseline; gap: 6px; border: 1px solid var(--line);
+  border-radius: 8px; padding: 8px 12px; background: var(--surface-2); }
+.stat strong { font-size: 17px; }
+.stat span { font-size: 12px; color: var(--muted); }
+.dot { width: 9px; height: 9px; border-radius: 50%; align-self: center; }
+
+.toolbar { display: flex; align-items: center; justify-content: space-between; margin-bottom: 8px; }
+.tabs { display: flex; gap: 4px; }
+.tabs button { background: none; border: 1px solid transparent; border-radius: 6px;
+  padding: 5px 12px; font-size: 13px; color: var(--muted); cursor: pointer; }
+.tabs button.active { background: var(--accent-soft); border-color: var(--accent);
+  color: var(--accent); font-weight: 600; }
+.toggle { font-size: 12px; color: var(--muted); display: flex; align-items: center; gap: 5px; }
+
+.grid-wrap { overflow: auto; max-height: 68vh; border: 1px solid var(--line); border-radius: 8px; }
+.grid { border-collapse: separate; border-spacing: 0; font-size: 12px; white-space: nowrap; }
+.grid th, .grid td { border-right: 1px solid var(--line-soft);
+  border-bottom: 1px solid var(--line-soft); padding: 5px 8px; text-align: center; }
+.grid thead th { position: sticky; top: 0; z-index: 2; background: var(--head);
+  color: #fff; font-weight: 600; }
+.grid thead th.weekend { background: var(--head-weekend); }
+.grid .name { text-align: left; font-weight: 600; }
+.grid .muted { text-align: left; }
+.grid .why { text-align: left; white-space: normal; min-width: 260px; max-width: 320px;
+  font-size: 11px; }
+
+.sticky-1, .sticky-2 { position: sticky; z-index: 1; background: var(--surface); }
+.sticky-1 { left: 0; min-width: 130px; }
+.sticky-2 { left: 130px; min-width: 190px; text-align: left; }
+thead .sticky-1, thead .sticky-2 { z-index: 3; background: var(--head); }
+
+.grid td.Morning { background: #FFF2CC; }
+.grid td.Afternoon { background: #FCE4D6; }
+.grid td.Evening { background: #E2EFDA; }
+.grid td.Night { background: #DDEBF7; }
+.grid td.Off { background: #EDEDED; color: var(--muted); }
+.grid td.weekend { box-shadow: inset 0 0 0 99px rgba(0, 0, 0, .025); }
+.dot.Morning { background: #E8B923; }
+.dot.Afternoon { background: #E07A3F; }
+.dot.Evening { background: #5A9E5D; }
+.dot.Night { background: #3F72AF; }
+
+.count { font-variant-numeric: tabular-nums; }
+.count.thin { background: #FFF6D8; }
+.count.empty { background: var(--error-soft); color: var(--error); font-weight: 700; }
+
+.notes { font-size: 12px; color: var(--muted); margin: 8px 0 0; }
