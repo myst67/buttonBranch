@@ -22,7 +22,8 @@ npm start                       # http://localhost:4200
 ```
 
 Need something to upload? `python backend/scripts/generate_sample_history.py`
-writes a realistic 23-employee sheet to `backend/data/sample/`.
+writes a realistic sheet to `backend/data/sample/` from the seed team in
+`backend/data/seed/team.json` - **20 clients and 60 employees** (see below).
 
 For a single-process deployment, `npm run build` then start the backend: it
 serves `dist/button-app` at `/` when that folder exists.
@@ -52,20 +53,45 @@ serves `dist/button-app` at `/` when that folder exists.
 | 5 | every client staffed in every shift on every day | `>= 1` on duty per client/shift/day, and `>= 2` people per client/shift so the offs can be staggered |
 | 6 | Excel output: `Name`, `Client`, then `Mon-01-Jul ...` | openpyxl, colour-coded, frozen panes |
 
+## How big does the team have to be?
+
 A client needs **at least 8 people** (2 per shift x 4 shifts) before 24x7 cover
 is possible at all - one person cannot cover a shift 7 days a week with 2-3 days
-off. Impossible teams are rejected with the specific reason instead of a
-timeout.
+off. For 20 clients that is a floor of `20 x 8 / 4 clients each = 40` employees.
+
+The floor is not enough in practice. At exactly 8 people a client has exactly 2
+per shift, so their week-offs must be perfectly disjoint *and* last month's
+shifts must happen to allow it. Solving 20 clients / 48 employees against 10
+different last-month shift mixes failed 3 times out of 10. So the seed team
+targets **10 employees per client**:
+
+```
+employees = clients x 10 / average clients per employee
+          = 20 x 10 / 3.33  = 60
+```
+
+`backend/data/seed/team.json` is that team: **60 employees, 20 clients**, every
+client with exactly 10 people, and a 2/3/4 client mix per employee (10 / 20 / 30
+people) as rule 2 allows. Verified at 10/10 valid rosters across random
+last-month shift mixes and five different months, ~7s each, with a second person
+on duty in ~62% of client/shift/weekday slots as cover.
+
+Change the size with `python backend/scripts/build_seed_team.py --clients 30`;
+it recalculates the headcount and refuses to write a team that cannot be
+rostered. Impossible teams are rejected at upload with the specific reason
+instead of a timeout.
 
 ## Tests
 
 ```bash
-cd backend && pytest -q                                   # 34 tests
+cd backend && pytest -q                                   # 37 tests
 npm test -- --watch=false --browsers=ChromeHeadlessCI     # Angular
 ```
 
 Backend coverage: parsing real-world sheet quirks, cold-start and multi-month
 learning, model persistence, every rule across five different months, the
-infeasibility diagnostics, and the full upload -> generate -> download API flow.
+infeasibility diagnostics, the shipped 20-client seed team, and the full monthly
+cycle - upload, generate, export, then re-upload that export as next month's
+input, asserting the shift model starts training and its weight grows.
 
 See `backend/README.md` for the model, the constraint formulation and the API.

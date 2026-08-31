@@ -132,20 +132,38 @@ class CandidateRanker:
 
         estimator.fit(X, y)
         self.estimator = estimator
-        metrics.top_features = self._explain(estimator)
+        metrics.top_features = self._explain(estimator, X, y)
         metrics.trained = True
         metrics.blend_weight = blend_weight(metrics.n_months)
         self.metrics = metrics
         return metrics
 
-    def _explain(self, estimator) -> list[tuple[str, float]]:
-        clf = estimator[-1] if hasattr(estimator, "__getitem__") and hasattr(estimator, "steps") else estimator
+    def _explain(self, estimator, X: np.ndarray, y: np.ndarray) -> list[tuple[str, float]]:
+        """What the model actually keyed on - shown in the UI and the Model sheet.
+
+        Linear models hand over signed coefficients directly; for the boosted
+        model there are none, so fall back to permutation importance (unsigned:
+        how much the ranking degrades when a feature is shuffled).
+        """
+        clf = estimator[-1] if hasattr(estimator, "steps") else estimator
         coefficients = getattr(clf, "coef_", None)
-        if coefficients is None:
+        if coefficients is not None:
+            weights = list(zip(self.feature_names, coefficients[0].tolist()))
+            weights.sort(key=lambda item: abs(item[1]), reverse=True)
+            return [(name, round(value, 3)) for name, value in weights[:6]]
+
+        try:
+            from sklearn.inspection import permutation_importance
+
+            # A sample is plenty, and keeps training snappy on long histories.
+            limit = min(len(y), 2000)
+            result = permutation_importance(estimator, X[:limit], y[:limit], n_repeats=5,
+                                            random_state=0, scoring="roc_auc")
+            weights = list(zip(self.feature_names, result.importances_mean.tolist()))
+            weights.sort(key=lambda item: abs(item[1]), reverse=True)
+            return [(name, round(value, 4)) for name, value in weights[:6]]
+        except Exception:
             return []
-        weights = list(zip(self.feature_names, coefficients[0].tolist()))
-        weights.sort(key=lambda item: abs(item[1]), reverse=True)
-        return [(name, round(value, 3)) for name, value in weights[:6]]
 
     # -- scoring ----------------------------------------------------------
     def score(self, features: list[float]) -> Optional[float]:

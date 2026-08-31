@@ -4,7 +4,8 @@
     python scripts/generate_sample_history.py
 
 Produces data/sample/last-month-<month>.xlsx in the wide layout the parser
-expects, built from the 23-employee / 6-client team in roster/data.
+expects, built from the seed team in data/seed (run build_seed_team.py first
+to change its size).
 """
 from __future__ import annotations
 
@@ -20,7 +21,7 @@ from app.calendar_utils import next_month  # noqa: E402
 from app.exporting import export_to_file  # noqa: E402
 from app.service import RosterService  # noqa: E402
 
-TEAM = ROOT.parent / "roster" / "data" / "employees.json"
+TEAM = ROOT / "data" / "seed" / "team.json"
 SEED_MONTH = "2025-05"
 
 
@@ -34,7 +35,7 @@ def main() -> None:
                                 model_dir=scratch / "models",
                                 export_dir=scratch / "exports")
         service.upload(json.dumps(team).encode(), "team.json", month_hint=SEED_MONTH)
-        roster = service.generate(month=target, time_limit_seconds=5)
+        roster = service.generate(month=target, time_limit_seconds=8)
 
         out_dir = ROOT / "data" / "sample"
         out_dir.mkdir(parents=True, exist_ok=True)

@@ -33,6 +33,8 @@ SCALE = 1000
 #: Phase 2 may give up this fraction of the preference score to buy spare cover.
 PREFERENCE_TOLERANCE = 0.02
 REDUNDANCY_TIME_LIMIT = 5.0
+#: How many times the shift-balance may be loosened before giving up.
+MAX_RELAXATIONS = 3
 
 
 class InfeasibleRoster(Exception):
@@ -149,20 +151,30 @@ def solve_roster(employees: list[EmployeeInput], learner, options: Optional[Solv
 
     notes: list[str] = []
     slack = options.balance_slack
-    max_slack = max(1, n)
 
-    while True:
+    # Balance is the only soft rule here, so it is the only thing worth relaxing.
+    # A few steps, then one attempt with it dropped entirely - never an unbounded
+    # loop that spends the full time limit on each of n slack values.
+    for attempt in range(MAX_RELAXATIONS + 2):
         result = _solve_once(employees, clients, members, shift_scores, off_scores,
                              options, slack, cp_model)
         if result is not None:
             break
-        if slack >= max_slack:
-            raise InfeasibleRoster([
-                "No roster satisfies every rule for this team, even with the shift "
-                "headcounts left completely free. The client/employee mapping is too "
-                "thin: give the thin clients more people, or spread people over more clients."])
-        slack += 1
-        notes.append(f"Relaxed the shift-balance slack to {slack} to find a feasible roster.")
+        if attempt == MAX_RELAXATIONS:
+            slack = n                      # last try: no balance constraint at all
+            notes.append("Dropped the shift-balance constraint entirely to find a "
+                         "feasible roster.")
+        elif attempt < MAX_RELAXATIONS:
+            slack += 1
+            notes.append(f"Relaxed the shift-balance slack to {slack} to find a "
+                         f"feasible roster.")
+    else:
+        raise InfeasibleRoster([
+            "No roster satisfies every rule for this team, even with the shift "
+            "headcounts left completely free. The client/employee mapping is too thin: "
+            "give the thin clients more people, or spread people over more clients.",
+            "Most often this means some client cannot have two people in every shift "
+            "once last month's shifts are excluded."])
 
     picks, status, objective, redundancy, seconds = result
 

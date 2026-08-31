@@ -119,3 +119,36 @@ def test_the_model_reports_what_it_learned(client, wide_workbook_bytes, team):
     assert report["shift_model"]["trained"] is True
     assert report["shift_model"]["top1_accuracy"] is not None
     assert 0 < report["shift_model"]["blend_weight"] <= 0.85
+
+
+def test_the_monthly_cycle_closes_and_the_model_learns(client, wide_workbook_bytes):
+    """Each month's export is next month's upload - the loop has to close.
+
+    It also has to *learn*: one month shows no shift change, so the shift model
+    only starts training once a second month arrives, and its weight rises from
+    there.
+    """
+    _upload(client, wide_workbook_bytes)
+    weights = []
+
+    for expected_month in ("2025-07", "2025-08", "2025-09"):
+        roster = client.post("/api/roster/generate",
+                             json={"time_limit_seconds": 2}).json()
+        assert roster["month"] == expected_month
+        assert roster["validation"]["ok"], roster["validation"]["errors"][:3]
+        weights.append(roster["meta"]["training"]["shift_model"]["blend_weight"])
+
+        # Feed this month's Excel export straight back in, as the user would.
+        export = client.get(f"/api/roster/{roster['meta']['id']}/export.xlsx")
+        uploaded = _upload(client, export.content, name=f"{expected_month}.xlsx").json()
+        assert uploaded["month"] == expected_month
+        assert uploaded["ready"] is True
+        assert uploaded["warnings"] == []
+        assert len(uploaded["employees"]) == len(roster["rows"])
+        assert uploaded["clients"] == roster["clients"]
+
+    # First month: nothing to learn from. Then it trains, and its say grows.
+    assert weights[0] == 0.0
+    assert weights[1] > 0.0
+    assert weights[2] > weights[1]
+    assert client.get("/api/model").json()["shift_model"]["trained"] is True

@@ -2,7 +2,9 @@
 from __future__ import annotations
 
 import datetime as dt
+import threading
 import uuid
+from collections import OrderedDict
 from pathlib import Path
 from typing import Optional
 
@@ -18,6 +20,9 @@ from .solver import (EmployeeInput, InfeasibleRoster, SolverOptions,
                      check_feasibility, solve_roster)
 from .validation import validate
 
+#: Generated rosters kept in memory for the download endpoints.
+MAX_CACHED_ROSTERS = 25
+
 
 class RosterService:
     def __init__(self, history_dir: Path | str = HISTORY_DIR,
@@ -28,7 +33,11 @@ class RosterService:
         self.export_dir = Path(export_dir)
         self.export_dir.mkdir(parents=True, exist_ok=True)
         self._learner: Optional[RosterLearner] = None
-        self._generated: dict[str, GeneratedRoster] = {}
+        # Recent rosters, kept for the download endpoints; every one is also
+        # written to disk, so the cap only bounds memory.
+        self._generated: "OrderedDict[str, GeneratedRoster]" = OrderedDict()
+        # Uploads retrain the shared model, so keep writers off each other.
+        self._lock = threading.Lock()
 
     # -- model ------------------------------------------------------------
     @property
@@ -40,11 +49,12 @@ class RosterService:
 
     def train(self) -> RosterLearner:
         """Refit both rankers on everything uploaded so far."""
-        learner = RosterLearner()
-        learner.train(self.store.load_all())
-        learner.save(self.model_dir)
-        self._learner = learner
-        return learner
+        with self._lock:
+            learner = RosterLearner()
+            learner.train(self.store.load_all())
+            learner.save(self.model_dir)
+            self._learner = learner
+            return learner
 
     def model_report(self) -> dict:
         report = self.learner.report
@@ -138,6 +148,8 @@ class RosterService:
         roster_id = uuid.uuid4().hex[:12]
         roster.meta["id"] = roster_id
         self._generated[roster_id] = roster
+        while len(self._generated) > MAX_CACHED_ROSTERS:
+            self._generated.popitem(last=False)
         export_to_file(roster, self.export_dir / f"roster-{target}-{roster_id}.xlsx")
         return roster
 

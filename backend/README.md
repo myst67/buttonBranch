@@ -8,9 +8,14 @@ pip install -r backend/requirements.txt
 
 cd backend
 uvicorn app.main:app --reload --port 8000     # http://localhost:8000/docs
-pytest -q                                     # 34 tests
-python scripts/generate_sample_history.py     # a sample sheet to upload
+pytest -q                                     # 37 tests
+python scripts/build_seed_team.py --clients 20   # size the team (default: 20 -> 60 people)
+python scripts/generate_sample_history.py       # a sample sheet to upload
 ```
+
+`data/seed/team.json` ships 60 employees over 20 clients - 10 people per client,
+which is the headroom above the 8-per-client floor that keeps every month
+solvable (see the root README for the arithmetic).
 
 ## The flow
 
@@ -69,7 +74,7 @@ about 0.05s for 23 people.
 
 | Rule | Constraint |
 |---|---|
-| 2. 2-4 clients each, >5 employees per client | checked before solving, with the exact client named |
+| 2. 2-4 clients each, >5 employees per client | checked before solving, with the exact client named (and the real floor is 8 per client, not 6) |
 | 3. one shift for the month, never last month's | `AddExactlyOne` over the legal pairs; last month's shift is not among them |
 | 4. Night 3 off + 4 on, others 2 off + 5 on, consecutive | the off block is stored as a start weekday and wraps the week (Sat-Sun-Mon), so both runs stay consecutive on the calendar |
 | 5. every client staffed in every shift, every day | `>= 1` on-duty per client/shift/weekday, plus `>= 2` people per client/shift so the offs can be staggered |

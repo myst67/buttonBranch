@@ -10,13 +10,20 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from app.models import EmployeeMonth, MonthRoster  # noqa: E402
 from app.service import RosterService  # noqa: E402
 
-TEAM_FILE = Path(__file__).resolve().parents[2] / "roster" / "data" / "employees.json"
+TEAM_FILE = Path(__file__).resolve().parent / "data" / "team-small.json"
+SEED_TEAM_FILE = Path(__file__).resolve().parents[1] / "data" / "seed" / "team.json"
 
 
 @pytest.fixture
 def team() -> list[dict]:
-    """23 employees over 6 clients - the shape the brief describes."""
+    """A small 23-employee / 6-client team, so the rule tests stay quick."""
     return json.loads(TEAM_FILE.read_text())
+
+
+@pytest.fixture
+def seed_team() -> list[dict]:
+    """The team actually shipped in data/seed - 60 employees over 20 clients."""
+    return json.loads(SEED_TEAM_FILE.read_text())
 
 
 @pytest.fixture

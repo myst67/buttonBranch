@@ -14,7 +14,7 @@ from typing import Optional
 
 from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, Response
+from fastapi.responses import Response
 from pydantic import BaseModel, Field
 
 from .config import MIN_PER_CLIENT_SHIFT, OFF_DAYS_PER_WEEK, SHIFTS, WEEKDAYS
@@ -41,9 +41,9 @@ class GenerateRequest(BaseModel):
     source_month: Optional[str] = Field(None, description="Which stored month to build from.")
     employees: Optional[list[dict]] = Field(None, description="Override the team (e.g. new joiners).")
     seed: int = 42
-    time_limit_seconds: float = 20.0
-    min_per_client_shift: int = MIN_PER_CLIENT_SHIFT
-    balance_slack: int = 1
+    time_limit_seconds: float = Field(20.0, ge=1.0, le=300.0)
+    min_per_client_shift: int = Field(MIN_PER_CLIENT_SHIFT, ge=1, le=20)
+    balance_slack: int = Field(1, ge=0, le=50)
 
 
 @app.get("/api/health")
