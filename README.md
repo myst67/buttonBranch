@@ -22,6 +22,7 @@ pip install -r backend/requirements.txt
 cd backend && uvicorn app.main:app --reload --port 8000
 
 # 2. UI (second terminal) - /api is proxied to :8000
+#    Needs Node 20 or 22; Angular 6 does not build on Node 24+.
 npm install
 npm start                       # http://localhost:4200
 ```

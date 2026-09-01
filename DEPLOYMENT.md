@@ -32,9 +32,17 @@ There are two ways to run them, and you probably want the second:
 | Need | Version | Check with |
 |---|---|---|
 | Python | 3.10 or newer (tested 3.11) | `python3 --version` |
-| Node.js | 18 or newer (tested 22) | `node --version` |
+| Node.js | **20 or 22 - not 24 or newer** (tested 20 and 22) | `node --version` |
 | npm | comes with Node (tested 10) | `npm --version` |
 | Git | any | `git --version` |
+
+> **The Node version matters.** This is an Angular 6 project, and its build
+> toolchain calls `process.binding('http_parser')`, which Node removed after
+> version 22. On Node 24+ every `ng` command - build *and* serve - dies with
+> `Error: No such module: http_parser`. Install Node 22 LTS from
+> <https://nodejs.org/en/download/releases> rather than whatever the front page
+> offers today. `npm install` warns (`EBADENGINE`) if your version is out of
+> range, and `.nvmrc` pins 22 for nvm users.
 
 On Windows install Python from python.org (tick **Add python.exe to PATH**) and
 Node from nodejs.org. Nothing else is required - no database, no Docker, and no
@@ -310,7 +318,9 @@ curl -X POST http://localhost:8000/api/roster/generate \
 
 | Symptom | Cause | Fix |
 |---|---|---|
+| `Error: No such module: http_parser` on any `ng` command | Node 24 or newer - the binding webpack 4's `spdy` needs was removed after Node 22 | install Node 22 LTS (section 2); check with `node --version` |
 | `error:0308010C:digital envelope routines::unsupported` | Node 17+ with webpack 4 | `export NODE_OPTIONS=--openssl-legacy-provider` (section 5.2) |
+| `npm warn EBADENGINE Unsupported engine` | your Node is outside the supported range | same - install Node 22 |
 | UI loads but every panel is empty; console shows failed `/api` calls | backend not running, or on another port | start uvicorn on 8000; in dev check `proxy.conf.json` |
 | "The backend is not reachable" banner | same | as above |
 | `Address already in use` | port taken | `uvicorn ... --port 8001`, and update `proxy.conf.json` to match |
@@ -350,7 +360,11 @@ full rather than as differences from the Linux commands.
 1. **Python** - <https://www.python.org/downloads/> . On the first installer
    screen tick **"Add python.exe to PATH"** before pressing Install. Missing
    that box is the single most common cause of `py is not recognized` later.
-2. **Node.js** - <https://nodejs.org/> , the LTS build. Accept the defaults.
+2. **Node.js** - **version 22**, from
+   <https://nodejs.org/en/download/releases> (pick a `v22.x.x` release and
+   download `node-v22.x.x-x64.msi`). Do **not** take Node 24 or newer from the
+   nodejs.org front page: this project's Angular 6 build fails on it with
+   `Error: No such module: http_parser`. Accept the installer defaults.
 3. **Git** - <https://git-scm.com/download/win> . Accept the defaults.
 
 Close any terminal you already had open afterwards - a terminal only picks up
@@ -363,7 +377,7 @@ three installs answer:
 
 ```powershell
 py --version        # Python 3.11.x  (3.10 or newer)
-node --version      # v20.x or v22.x
+node --version      # must be v20.x or v22.x - NOT v24 or newer
 git --version       # git version 2.x
 ```
 
@@ -466,6 +480,7 @@ requirements.
 | `py : The term 'py' is not recognized` | Python not installed, or "Add to PATH" was missed. Reinstall, then open a new PowerShell. Or try `python -m venv .venv`. |
 | `Activate.ps1 cannot be loaded because running scripts is disabled` | `Set-ExecutionPolicy -Scope CurrentUser RemoteSigned`, answer `Y`, then run the activate line again. |
 | `npm : The term 'npm' is not recognized` | Node not installed, or the terminal predates the install. Open a new PowerShell. |
+| `Error: No such module: http_parser` | Your Node is 24 or newer. Uninstall it from **Settings > Apps**, install Node 22 from <https://nodejs.org/en/download/releases>, open a new PowerShell, confirm with `node --version`, then rerun. Nothing else needs redoing except `npm install`. |
 | `error:0308010C:digital envelope routines::unsupported` | The `$env:NODE_OPTIONS` line was not set in *this* window. Set it and rerun. |
 | `ModuleNotFoundError: No module named 'fastapi'` | The `(.venv)` prefix is missing - run the activate line. |
 | `ModuleNotFoundError: No module named 'app'` | You are not in the `backend` folder. `cd backend` first. |
