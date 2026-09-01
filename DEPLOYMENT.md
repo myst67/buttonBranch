@@ -267,7 +267,7 @@ Under `ROSTER_DATA_DIR` (by default `backend/data`):
 
 ```bash
 pip install -r backend/requirements-dev.txt
-cd backend && pytest -q                  # 37 passed
+cd backend && pytest -q                  # 38 passed
 
 cd ..
 npm test                                 # 5 passed

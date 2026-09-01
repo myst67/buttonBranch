@@ -151,12 +151,21 @@ def export_csv(roster_id: str) -> Response:
                              f'attachment; filename="roster-{roster.month.key}.csv"'})
 
 
+def find_ui_build(dist_root: Path) -> Optional[Path]:
+    """Locate the built UI, if it has been built.
+
+    Angular writes the browser bundle to dist/<project>/browser; builds from
+    before the Angular 22 upgrade wrote straight into dist/<project>. Accept
+    either, so an older checkout keeps serving.
+    """
+    for candidate in (dist_root / "browser", dist_root):
+        if (candidate / "index.html").is_file():
+            return candidate
+    return None
+
+
 # Serve the built Angular app when it is there, so one process runs everything.
-# Angular puts the browser bundle in dist/<project>/browser; older builds wrote
-# straight into dist/<project>, so accept either.
-_DIST_ROOT = Path(__file__).resolve().parent.parent.parent / "dist" / "button-app"
-_DIST = next((path for path in (_DIST_ROOT / "browser", _DIST_ROOT)
-              if (path / "index.html").exists()), None)
+_DIST = find_ui_build(Path(__file__).resolve().parent.parent.parent / "dist" / "button-app")
 if _DIST is not None:
     from fastapi.staticfiles import StaticFiles
 

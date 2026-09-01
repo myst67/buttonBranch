@@ -90,8 +90,8 @@ instead of a timeout.
 ## Tests
 
 ```bash
-cd backend && pytest -q                                   # 37 tests
-npm test                                                  # Angular (Vitest)
+cd backend && pytest -q                                   # 38 tests
+npm test                                                  # 5 UI tests (Vitest)
 ```
 
 Backend coverage: parsing real-world sheet quirks, cold-start and multi-month

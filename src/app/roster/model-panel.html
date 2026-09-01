@@ -6,61 +6,59 @@
       blended with rotation heuristics - the weight moves to the model as months accumulate.</p>
   </div>
 
-  @if (training(); as report) {
-    @if (report.n_history_months) {
-      <p class="months">
-        Trained on <strong>{{ report.n_history_months }}</strong> month(s):
-        @for (month of report.months; track month) {
-          <span class="tag">{{ month }}</span>
-        }
-      </p>
+  @let report = training();
 
-      <div class="cards">
-        @for (model of models(); track model.title) {
-          <div class="card">
-            <div class="card-head">
-              <h3>{{ model.title }}</h3>
-              <span class="badge" [class.on]="model.metrics.trained">
-                {{ model.metrics.trained ? model.metrics.estimator : 'heuristics only' }}
-              </span>
-            </div>
-            <p class="what">Learns {{ model.what }}.</p>
+  @if (report && report.n_history_months) {
+    <p class="months">
+      Trained on <strong>{{ report.n_history_months }}</strong> month(s):
+      @for (month of report.months; track month) {
+        <span class="tag">{{ month }}</span>
+      }
+    </p>
 
-            <div class="blend">
-              <div class="blend-bar">
-                <div class="blend-fill" [style.width]="percent(model.metrics.blend_weight)"></div>
-              </div>
-              <span class="blend-label">
-                {{ percent(model.metrics.blend_weight) }} model /
-                {{ percent(1 - model.metrics.blend_weight) }} heuristics
-              </span>
-            </div>
-
-            @if (model.metrics.trained) {
-              <dl>
-                <div><dt>Top-1 accuracy</dt><dd>{{ percent(model.metrics.top1_accuracy) }}</dd></div>
-                <div><dt>ROC AUC</dt><dd>{{ model.metrics.roc_auc ?? '-' }}</dd></div>
-                <div><dt>Training rows</dt><dd>{{ model.metrics.n_samples }}</dd></div>
-              </dl>
-            }
-            <p class="evaluation">{{ model.metrics.evaluation }}</p>
-
-            @if (model.metrics.top_features.length) {
-              <div class="features">
-                <span class="features-label">Strongest signals</span>
-                @for (feature of model.metrics.top_features; track feature[0]) {
-                  <span class="feature" [class.negative]="feature[1] < 0">
-                    {{ feature[0] }} <em>{{ feature[1] > 0 ? '+' : '' }}{{ feature[1] }}</em>
-                  </span>
-                }
-              </div>
-            }
+    <div class="cards">
+      @for (model of models(); track model.title) {
+        <div class="card">
+          <div class="card-head">
+            <h3>{{ model.title }}</h3>
+            <span class="badge" [class.on]="model.metrics.trained">
+              {{ model.metrics.trained ? model.metrics.estimator : 'heuristics only' }}
+            </span>
           </div>
-        }
-      </div>
-    } @else {
-      <div class="empty">No history yet. Upload last month's roster to start training.</div>
-    }
+          <p class="what">Learns {{ model.what }}.</p>
+
+          <div class="blend">
+            <div class="blend-bar">
+              <div class="blend-fill" [style.width]="percent(model.metrics.blend_weight)"></div>
+            </div>
+            <span class="blend-label">
+              {{ percent(model.metrics.blend_weight) }} model /
+              {{ percent(1 - model.metrics.blend_weight) }} heuristics
+            </span>
+          </div>
+
+          @if (model.metrics.trained) {
+            <dl>
+              <div><dt>Top-1 accuracy</dt><dd>{{ percent(model.metrics.top1_accuracy) }}</dd></div>
+              <div><dt>ROC AUC</dt><dd>{{ model.metrics.roc_auc ?? '-' }}</dd></div>
+              <div><dt>Training rows</dt><dd>{{ model.metrics.n_samples }}</dd></div>
+            </dl>
+          }
+          <p class="evaluation">{{ model.metrics.evaluation }}</p>
+
+          @if (model.metrics.top_features.length) {
+            <div class="features">
+              <span class="features-label">Strongest signals</span>
+              @for (feature of model.metrics.top_features; track feature[0]) {
+                <span class="feature" [class.negative]="feature[1] < 0">
+                  {{ feature[0] }} <em>{{ feature[1] > 0 ? '+' : '' }}{{ feature[1] }}</em>
+                </span>
+              }
+            </div>
+          }
+        </div>
+      }
+    </div>
   } @else {
     <div class="empty">No history yet. Upload last month's roster to start training.</div>
   }

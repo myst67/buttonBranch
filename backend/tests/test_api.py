@@ -152,3 +152,20 @@ def test_the_monthly_cycle_closes_and_the_model_learns(client, wide_workbook_byt
     assert weights[1] > 0.0
     assert weights[2] > weights[1]
     assert client.get("/api/model").json()["shift_model"]["trained"] is True
+
+
+def test_the_built_ui_is_found_in_either_dist_layout(tmp_path):
+    """Angular 22 writes dist/<project>/browser; older builds wrote the folder
+    itself. Serving must keep working across that change."""
+    from app.main import find_ui_build
+
+    dist = tmp_path / "button-app"
+    (dist / "browser").mkdir(parents=True)
+
+    assert find_ui_build(dist) is None                 # nothing built yet
+
+    (dist / "index.html").write_text("legacy")
+    assert find_ui_build(dist) == dist                 # pre-upgrade layout
+
+    (dist / "browser" / "index.html").write_text("current")
+    assert find_ui_build(dist) == dist / "browser"     # current layout wins
