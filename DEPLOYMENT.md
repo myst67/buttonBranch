@@ -4,7 +4,10 @@ Everything below was run end to end on a clean checkout. Where a command is
 platform-specific, the Linux/macOS form is given first and the Windows
 (PowerShell) form second.
 
-Verified on Linux with Python 3.11.15, Node 22.22.2 and npm 10.9.7.
+Verified on Linux with Python 3.11.15, Node 22.22.2 and npm 10.9.7. The Windows
+commands are the platform equivalents of those same steps - **on Windows 11,
+follow the [appendix](#appendix-windows-11-step-by-step)**, which spells the
+whole thing out from an empty machine.
 
 ---
 
@@ -334,3 +337,138 @@ npm run build -- --prod                      # Option A only
 
 Your uploaded history is untouched by an update; the model refits from it on the
 next upload, or immediately via `POST /api/train`.
+
+---
+
+## Appendix: Windows 11, step by step
+
+The whole thing in one pass, assuming nothing is installed yet. Written out in
+full rather than as differences from the Linux commands.
+
+### A. Install the three prerequisites
+
+1. **Python** - <https://www.python.org/downloads/> . On the first installer
+   screen tick **"Add python.exe to PATH"** before pressing Install. Missing
+   that box is the single most common cause of `py is not recognized` later.
+2. **Node.js** - <https://nodejs.org/> , the LTS build. Accept the defaults.
+3. **Git** - <https://git-scm.com/download/win> . Accept the defaults.
+
+Close any terminal you already had open afterwards - a terminal only picks up
+newly installed programs when it starts.
+
+### B. Open PowerShell
+
+Press **Start**, type `PowerShell`, and open **Windows PowerShell**. Check all
+three installs answer:
+
+```powershell
+py --version        # Python 3.11.x  (3.10 or newer)
+node --version      # v20.x or v22.x
+git --version       # git version 2.x
+```
+
+If any says *"not recognized"*, that program is not installed or PATH was
+missed - reinstall it, then open a fresh PowerShell window.
+
+### C. Get the code
+
+```powershell
+cd $HOME
+git clone https://github.com/myst67/buttonBranch.git
+cd buttonBranch
+```
+
+Everything below is run from this `buttonBranch` folder.
+
+### D. Set up the Python side
+
+```powershell
+py -m venv .venv
+.\.venv\Scripts\Activate.ps1
+pip install -r backend\requirements.txt
+```
+
+After the second line your prompt gains a `(.venv)` prefix:
+
+```
+(.venv) PS C:\Users\you\buttonBranch>
+```
+
+That prefix means the project's Python is active. If PowerShell refuses with
+*"running scripts is disabled on this system"*, allow it once for your user and
+run the activate line again:
+
+```powershell
+Set-ExecutionPolicy -Scope CurrentUser RemoteSigned      # answer Y
+```
+
+### E. Make a sample roster to upload
+
+```powershell
+cd backend
+python scripts\generate_sample_history.py
+cd ..
+```
+
+Writes `backend\data\sample\last-month-2025-06.xlsx`. Skip it if you are
+uploading your own sheet.
+
+### F. Build the UI
+
+```powershell
+npm install
+$env:NODE_OPTIONS = "--openssl-legacy-provider"
+npm run build -- --prod
+```
+
+`npm install` takes a few minutes and prints audit warnings about the old
+Angular toolchain - expected, and harmless.
+
+The `NODE_OPTIONS` line is required on Node 17 and newer, and lasts only for
+this window. To set it permanently, run this once and then open a new
+PowerShell:
+
+```powershell
+[Environment]::SetEnvironmentVariable("NODE_OPTIONS", "--openssl-legacy-provider", "User")
+```
+
+### G. Run it
+
+```powershell
+cd backend
+uvicorn app.main:app --host 127.0.0.1 --port 8000
+```
+
+Leave that window open - it is the running application. Open
+**<http://localhost:8000>** in your browser.
+
+Press **Ctrl+C** in the PowerShell window to stop it.
+
+### H. Every time after the first
+
+Nothing above needs repeating. To start it again:
+
+```powershell
+cd $HOME\buttonBranch
+.\.venv\Scripts\Activate.ps1
+cd backend
+uvicorn app.main:app --host 127.0.0.1 --port 8000
+```
+
+Only re-run `npm run build -- --prod` after changing anything in `src\`, and
+`pip install -r backend\requirements.txt` after a `git pull` that changed the
+requirements.
+
+### I. Windows-specific problems
+
+| Message | Fix |
+|---|---|
+| `py : The term 'py' is not recognized` | Python not installed, or "Add to PATH" was missed. Reinstall, then open a new PowerShell. Or try `python -m venv .venv`. |
+| `Activate.ps1 cannot be loaded because running scripts is disabled` | `Set-ExecutionPolicy -Scope CurrentUser RemoteSigned`, answer `Y`, then run the activate line again. |
+| `npm : The term 'npm' is not recognized` | Node not installed, or the terminal predates the install. Open a new PowerShell. |
+| `error:0308010C:digital envelope routines::unsupported` | The `$env:NODE_OPTIONS` line was not set in *this* window. Set it and rerun. |
+| `ModuleNotFoundError: No module named 'fastapi'` | The `(.venv)` prefix is missing - run the activate line. |
+| `ModuleNotFoundError: No module named 'app'` | You are not in the `backend` folder. `cd backend` first. |
+| `[Errno 10048] ... address already in use` | An older copy is still running. Close its window, or use `--port 8001`. |
+| Browser shows "can't reach this page" | The PowerShell window running uvicorn was closed. It has to stay open. |
+| Page loads but panels are empty | Backend up but UI not built - run `npm run build -- --prod`, then restart uvicorn. |

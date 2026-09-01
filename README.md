@@ -12,7 +12,8 @@ roster, rule-checked and in Excel.
 
 **Setting this up on your own machine? See [DEPLOYMENT.md](DEPLOYMENT.md)** for
 the full from-scratch guide - prerequisites, both run modes, running it as a
-service, configuration, backups and troubleshooting. The short version:
+service, configuration, backups and troubleshooting. On Windows 11, follow its
+step-by-step appendix. The short version:
 
 ```bash
 # 1. backend
