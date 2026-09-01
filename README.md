@@ -4,7 +4,7 @@ Upload last month's roster on the last day of the month; get the new month's
 roster, rule-checked and in Excel.
 
 * **Backend** - Python (FastAPI + scikit-learn + OR-Tools CP-SAT) in `backend/`
-* **UI** - Angular in `src/`
+* **UI** - Angular 22 in `src/`
 * `roster/` - the original dependency-free Node.js prototype of the scheduling
   rules, kept as a reference implementation
 
@@ -22,7 +22,7 @@ pip install -r backend/requirements.txt
 cd backend && uvicorn app.main:app --reload --port 8000
 
 # 2. UI (second terminal) - /api is proxied to :8000
-#    Needs Node 20 or 22; Angular 6 does not build on Node 24+.
+#    Needs Node 22.22.3+, 24.15+ or 26+.
 npm install
 npm start                       # http://localhost:4200
 ```
@@ -32,7 +32,7 @@ writes a realistic sheet to `backend/data/sample/` from the seed team in
 `backend/data/seed/team.json` - **20 clients and 60 employees** (see below).
 
 For a single-process deployment, `npm run build` then start the backend: it
-serves `dist/button-app` at `/` when that folder exists.
+serves `dist/button-app/browser` at `/` when that folder exists.
 
 ## What it does
 
@@ -91,7 +91,7 @@ instead of a timeout.
 
 ```bash
 cd backend && pytest -q                                   # 37 tests
-npm test -- --watch=false --browsers=ChromeHeadlessCI     # Angular
+npm test                                                  # Angular (Vitest)
 ```
 
 Backend coverage: parsing real-world sheet quirks, cold-start and multi-month

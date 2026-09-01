@@ -152,8 +152,12 @@ def export_csv(roster_id: str) -> Response:
 
 
 # Serve the built Angular app when it is there, so one process runs everything.
-_DIST = Path(__file__).resolve().parent.parent.parent / "dist" / "button-app"
-if _DIST.exists():
+# Angular puts the browser bundle in dist/<project>/browser; older builds wrote
+# straight into dist/<project>, so accept either.
+_DIST_ROOT = Path(__file__).resolve().parent.parent.parent / "dist" / "button-app"
+_DIST = next((path for path in (_DIST_ROOT / "browser", _DIST_ROOT)
+              if (path / "index.html").exists()), None)
+if _DIST is not None:
     from fastapi.staticfiles import StaticFiles
 
     app.mount("/", StaticFiles(directory=str(_DIST), html=True), name="ui")

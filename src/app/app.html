@@ -8,10 +8,10 @@
 
 <main class="wrap">
   <app-upload-panel
-    [result]="uploadResult" [history]="history" [busy]="uploading" [error]="uploadError"
+    [result]="uploadResult()" [history]="history()" [busy]="uploading()" [error]="uploadError()"
     (upload)="onUpload($event)" (remove)="onRemoveMonth($event)"></app-upload-panel>
 
-  <app-model-panel [training]="training"></app-model-panel>
+  <app-model-panel [training]="training()"></app-model-panel>
 
   <div class="panel">
     <div class="panel-head">
@@ -44,16 +44,24 @@
         <label for="limit">Time limit (s)</label>
         <input id="limit" name="limit" type="number" min="1" [(ngModel)]="options.time_limit_seconds">
       </div>
-      <button type="button" class="button primary large" (click)="generate()" [disabled]="!canGenerate">
-        {{ generating ? 'Solving...' : 'Generate roster' }}
+      <button type="button" class="button primary large" (click)="generate()" [disabled]="!canGenerate()">
+        {{ generating() ? 'Solving...' : 'Generate roster' }}
       </button>
     </div>
 
-    <div class="alert error" *ngIf="generateError">
-      {{ generateError }}
-      <ul *ngIf="generateReasons.length"><li *ngFor="let reason of generateReasons">{{ reason }}</li></ul>
-    </div>
+    @if (generateError(); as message) {
+      <div class="alert error">
+        {{ message }}
+        @if (generateReasons().length) {
+          <ul>
+            @for (reason of generateReasons(); track reason) {
+              <li>{{ reason }}</li>
+            }
+          </ul>
+        }
+      </div>
+    }
   </div>
 
-  <app-roster-table [roster]="roster"></app-roster-table>
+  <app-roster-table [roster]="roster()"></app-roster-table>
 </main>

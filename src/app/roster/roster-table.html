@@ -1,0 +1,133 @@
+@if (roster(); as sheet) {
+  <div class="panel">
+    <div class="panel-head result-head">
+      <div>
+        <h2><span class="step">4</span> {{ sheet.month_label }} roster</h2>
+        <p class="hint">
+          {{ sheet.rows.length }} employees, {{ sheet.clients.length }} clients,
+          {{ sheet.days.length }} days &middot; solved in {{ sheet.meta.solve_seconds }}s
+          ({{ sheet.meta.solver_status }})
+        </p>
+      </div>
+      <div class="downloads">
+        <a class="button primary" [href]="exportUrl('xlsx')">Download Excel</a>
+        <a class="button" [href]="exportUrl('csv')">CSV</a>
+      </div>
+    </div>
+
+    @if (sheet.validation.ok) {
+      <div class="alert ok">
+        All rules re-checked and valid: one shift per person for the month and never last month's,
+        {{ sheet.validation.checked.client_shift_day_slots }} client/shift/day slots all staffed,
+        week-offs consecutive in every week.
+      </div>
+    } @else {
+      <div class="alert error">
+        <strong>{{ sheet.validation.errors.length }} rule violation(s):</strong>
+        <ul>
+          @for (error of sheet.validation.errors.slice(0, 10); track error) {
+            <li>{{ error }}</li>
+          }
+        </ul>
+      </div>
+    }
+
+    <div class="stats">
+      @for (shift of shifts; track shift) {
+        <div class="stat">
+          <span class="dot" [class]="'dot ' + shift"></span>
+          <strong>{{ headcount(shift) }}</strong>
+          <span>{{ shift }}</span>
+        </div>
+      }
+      <div class="stat">
+        <strong>{{ minimumCover() }}</strong>
+        <span>thinnest cover</span>
+      </div>
+      <div class="stat">
+        <strong>{{ slotsWithSpare() }}/{{ totalSlots() }}</strong>
+        <span>slots with a spare</span>
+      </div>
+    </div>
+
+    <div class="toolbar">
+      <div class="tabs">
+        <button type="button" [class.active]="view() === 'roster'" (click)="view.set('roster')">
+          Roster
+        </button>
+        <button type="button" [class.active]="view() === 'coverage'" (click)="view.set('coverage')">
+          Coverage check
+        </button>
+      </div>
+      @if (view() === 'roster') {
+        <label class="toggle">
+          <input type="checkbox" name="showWhy" [(ngModel)]="showWhy"> Show why
+        </label>
+      }
+    </div>
+
+    @if (view() === 'roster') {
+      <div class="grid-wrap">
+        <table class="grid">
+          <thead>
+            <tr>
+              <th class="sticky-1">Name</th>
+              <th class="sticky-2">Client</th>
+              @if (showWhy) {
+                <th class="why">Why</th>
+              }
+              @for (day of sheet.days; track day.label) {
+                <th [class.weekend]="day.weekday >= 5">{{ day.label }}</th>
+              }
+            </tr>
+          </thead>
+          <tbody>
+            @for (row of sheet.rows; track row.name) {
+              <tr>
+                <td class="sticky-1 name">{{ row.name }}</td>
+                <td class="sticky-2 muted">{{ row.client_label }}</td>
+                @if (showWhy) {
+                  <td class="why muted">{{ row.reason }}</td>
+                }
+                @for (cell of row.cells; track $index) {
+                  <td [class]="cell" [class.weekend]="isWeekend($index)">{{ cell }}</td>
+                }
+              </tr>
+            }
+          </tbody>
+        </table>
+      </div>
+    } @else {
+      <div class="grid-wrap">
+        <table class="grid">
+          <thead>
+            <tr>
+              <th class="sticky-1">Client</th>
+              <th class="sticky-2">Shift</th>
+              @for (day of sheet.days; track day.label) {
+                <th [class.weekend]="day.weekday >= 5">{{ day.label }}</th>
+              }
+            </tr>
+          </thead>
+          <tbody>
+            @for (entry of sheet.coverage; track entry.client + entry.shift) {
+              <tr>
+                <td class="sticky-1 name">{{ entry.client }}</td>
+                <td class="sticky-2" [class]="'sticky-2 ' + entry.shift">{{ entry.shift }}</td>
+                @for (count of entry.per_day; track $index) {
+                  <td class="count" [class.thin]="count === 1" [class.empty]="count === 0">
+                    {{ count }}
+                  </td>
+                }
+              </tr>
+            }
+          </tbody>
+        </table>
+      </div>
+    }
+
+    @for (note of sheet.meta.notes; track note) {
+      <p class="notes">{{ note }}</p>
+    }
+  </div>
+}

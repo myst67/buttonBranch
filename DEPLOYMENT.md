@@ -4,10 +4,10 @@ Everything below was run end to end on a clean checkout. Where a command is
 platform-specific, the Linux/macOS form is given first and the Windows
 (PowerShell) form second.
 
-Verified on Linux with Python 3.11.15, Node 22.22.2 and npm 10.9.7. The Windows
-commands are the platform equivalents of those same steps - **on Windows 11,
-follow the [appendix](#appendix-windows-11-step-by-step)**, which spells the
-whole thing out from an empty machine.
+Verified on Linux with Python 3.11.15 and Node 26.8.1. The Windows commands are
+the platform equivalents of those same steps - **on Windows 11, follow the
+[appendix](#appendix-windows-11-step-by-step)**, which spells the whole thing
+out from an empty machine.
 
 ---
 
@@ -32,17 +32,9 @@ There are two ways to run them, and you probably want the second:
 | Need | Version | Check with |
 |---|---|---|
 | Python | 3.10 or newer (tested 3.11) | `python3 --version` |
-| Node.js | **20 or 22 - not 24 or newer** (tested 20 and 22) | `node --version` |
+| Node.js | 22.22.3+, 24.15+, or 26+ (tested 26.8.1) | `node --version` |
 | npm | comes with Node (tested 10) | `npm --version` |
 | Git | any | `git --version` |
-
-> **The Node version matters.** This is an Angular 6 project, and its build
-> toolchain calls `process.binding('http_parser')`, which Node removed after
-> version 22. On Node 24+ every `ng` command - build *and* serve - dies with
-> `Error: No such module: http_parser`. Install Node 22 LTS from
-> <https://nodejs.org/en/download/releases> rather than whatever the front page
-> offers today. `npm install` warns (`EBADENGINE`) if your version is out of
-> range, and `.nvmrc` pins 22 for nvm users.
 
 On Windows install Python from python.org (tick **Add python.exe to PATH**) and
 Node from nodejs.org. Nothing else is required - no database, no Docker, and no
@@ -131,32 +123,11 @@ This takes a few minutes and prints audit warnings about the Angular 6
 toolchain. They are expected on a project of this vintage and do not affect the
 build.
 
-### 5.2 The one gotcha: Node 17 and newer
+### 5.2 Nothing else to configure
 
-The Angular 6 toolchain uses webpack 4, which calls an OpenSSL hash that Node 17
-removed. Without the workaround **any** `ng` command dies with:
-
-```
-Error: error:0308010C:digital envelope routines::unsupported
-    at new Hash (node:internal/crypto/hash:101:19)
-```
-
-Set `NODE_OPTIONS=--openssl-legacy-provider` for every `ng` command:
-
-```bash
-export NODE_OPTIONS=--openssl-legacy-provider     # bash/zsh, current terminal
-```
-
-```powershell
-$env:NODE_OPTIONS = "--openssl-legacy-provider"   # PowerShell, current terminal
-```
-
-```cmd
-set NODE_OPTIONS=--openssl-legacy-provider        :: cmd.exe, current terminal
-```
-
-To avoid setting it every time, put it in your shell profile - or use Node 16,
-which does not need it.
+The UI is Angular 22, built with esbuild. There is no `NODE_OPTIONS` workaround
+and no browser needed for the tests - if `npm install` finished, `npm run build`
+and `npm start` will work.
 
 ## 6. Run it
 
@@ -165,7 +136,7 @@ which does not need it.
 Build the UI once, then let the backend serve it:
 
 ```bash
-npm run build -- --prod          # writes dist/button-app
+npm run build                    # writes dist/button-app/browser
 cd backend
 uvicorn app.main:app --host 127.0.0.1 --port 8000
 ```
@@ -174,10 +145,10 @@ Open **<http://localhost:8000>**. The backend serves the built UI at `/` and the
 API under `/api`, so there is only one process to keep running and no CORS or
 proxy to configure.
 
-Rebuild (`npm run build -- --prod`) after any change to `src/`; restart uvicorn
+Rebuild (`npm run build`) after any change to `src/`; restart uvicorn
 after any change to `backend/`.
 
-> Start uvicorn **after** the build finishes. It looks for `dist/button-app`
+> Start uvicorn **after** the build finishes. It looks for `dist/button-app/browser`
 > once, at startup - a backend started while the build had the folder wiped will
 > answer `/api` normally but return 404 for the page.
 
@@ -299,11 +270,10 @@ pip install -r backend/requirements-dev.txt
 cd backend && pytest -q                  # 37 passed
 
 cd ..
-npm test -- --watch=false --browsers=ChromeHeadlessCI   # 4 SUCCESS
+npm test                                 # 5 passed
 ```
 
-The Angular tests need Chrome. Point `CHROME_BIN` at it if karma cannot find it
-(`export CHROME_BIN=/usr/bin/chromium`).
+The UI tests run on Vitest with jsdom - no browser or display needed.
 
 Or smoke-test the running server:
 
@@ -318,9 +288,7 @@ curl -X POST http://localhost:8000/api/roster/generate \
 
 | Symptom | Cause | Fix |
 |---|---|---|
-| `Error: No such module: http_parser` on any `ng` command | Node 24 or newer - the binding webpack 4's `spdy` needs was removed after Node 22 | install Node 22 LTS (section 2); check with `node --version` |
-| `error:0308010C:digital envelope routines::unsupported` | Node 17+ with webpack 4 | `export NODE_OPTIONS=--openssl-legacy-provider` (section 5.2) |
-| `npm warn EBADENGINE Unsupported engine` | your Node is outside the supported range | same - install Node 22 |
+| `npm warn EBADENGINE Unsupported engine` | your Node is older than the supported range | install Node 22.22.3+, 24.15+ or 26+ |
 | UI loads but every panel is empty; console shows failed `/api` calls | backend not running, or on another port | start uvicorn on 8000; in dev check `proxy.conf.json` |
 | "The backend is not reachable" banner | same | as above |
 | `Address already in use` | port taken | `uvicorn ... --port 8001`, and update `proxy.conf.json` to match |
@@ -333,7 +301,6 @@ curl -X POST http://localhost:8000/api/roster/generate \
 | `ng` not found | dependencies not installed | `npm install` (use `npx ng` rather than a global install) |
 | `/api` answers but `http://localhost:8000/` returns 404 | backend started before `dist/button-app` existed | build first, then restart uvicorn (section 6) |
 | `Address already in use` on 8000 after a restart | the previous backend is still running | stop it first: `pkill -f "uvicorn app.main"`, or Task Manager on Windows |
-| Karma: `Running as root without --no-sandbox` | Chrome under root | use the `ChromeHeadlessCI` launcher, as in section 11 |
 
 ## 13. Updating
 
@@ -341,7 +308,7 @@ curl -X POST http://localhost:8000/api/roster/generate \
 git pull
 pip install -r backend/requirements.txt      # if requirements changed
 npm install                                  # if package.json changed
-npm run build -- --prod                      # Option A only
+npm run build                                # Option A only
 # restart uvicorn
 ```
 
@@ -360,11 +327,8 @@ full rather than as differences from the Linux commands.
 1. **Python** - <https://www.python.org/downloads/> . On the first installer
    screen tick **"Add python.exe to PATH"** before pressing Install. Missing
    that box is the single most common cause of `py is not recognized` later.
-2. **Node.js** - **version 22**, from
-   <https://nodejs.org/en/download/releases> (pick a `v22.x.x` release and
-   download `node-v22.x.x-x64.msi`). Do **not** take Node 24 or newer from the
-   nodejs.org front page: this project's Angular 6 build fails on it with
-   `Error: No such module: http_parser`. Accept the installer defaults.
+2. **Node.js** - <https://nodejs.org/> , the current or LTS build. Anything from
+   22.22.3 upwards works, including Node 26. Accept the installer defaults.
 3. **Git** - <https://git-scm.com/download/win> . Accept the defaults.
 
 Close any terminal you already had open afterwards - a terminal only picks up
@@ -377,7 +341,7 @@ three installs answer:
 
 ```powershell
 py --version        # Python 3.11.x  (3.10 or newer)
-node --version      # must be v20.x or v22.x - NOT v24 or newer
+node --version      # v22.22.3+, v24.15+ or v26+
 git --version       # git version 2.x
 ```
 
@@ -431,20 +395,10 @@ uploading your own sheet.
 
 ```powershell
 npm install
-$env:NODE_OPTIONS = "--openssl-legacy-provider"
-npm run build -- --prod
+npm run build
 ```
 
-`npm install` takes a few minutes and prints audit warnings about the old
-Angular toolchain - expected, and harmless.
-
-The `NODE_OPTIONS` line is required on Node 17 and newer, and lasts only for
-this window. To set it permanently, run this once and then open a new
-PowerShell:
-
-```powershell
-[Environment]::SetEnvironmentVariable("NODE_OPTIONS", "--openssl-legacy-provider", "User")
-```
+`npm install` takes a couple of minutes; the build takes a few seconds.
 
 ### G. Run it
 
@@ -469,7 +423,7 @@ cd backend
 uvicorn app.main:app --host 127.0.0.1 --port 8000
 ```
 
-Only re-run `npm run build -- --prod` after changing anything in `src\`, and
+Only re-run `npm run build` after changing anything in `src\`, and
 `pip install -r backend\requirements.txt` after a `git pull` that changed the
 requirements.
 
@@ -480,10 +434,8 @@ requirements.
 | `py : The term 'py' is not recognized` | Python not installed, or "Add to PATH" was missed. Reinstall, then open a new PowerShell. Or try `python -m venv .venv`. |
 | `Activate.ps1 cannot be loaded because running scripts is disabled` | `Set-ExecutionPolicy -Scope CurrentUser RemoteSigned`, answer `Y`, then run the activate line again. |
 | `npm : The term 'npm' is not recognized` | Node not installed, or the terminal predates the install. Open a new PowerShell. |
-| `Error: No such module: http_parser` | Your Node is 24 or newer. Uninstall it from **Settings > Apps**, install Node 22 from <https://nodejs.org/en/download/releases>, open a new PowerShell, confirm with `node --version`, then rerun. Nothing else needs redoing except `npm install`. |
-| `error:0308010C:digital envelope routines::unsupported` | The `$env:NODE_OPTIONS` line was not set in *this* window. Set it and rerun. |
 | `ModuleNotFoundError: No module named 'fastapi'` | The `(.venv)` prefix is missing - run the activate line. |
 | `ModuleNotFoundError: No module named 'app'` | You are not in the `backend` folder. `cd backend` first. |
 | `[Errno 10048] ... address already in use` | An older copy is still running. Close its window, or use `--port 8001`. |
 | Browser shows "can't reach this page" | The PowerShell window running uvicorn was closed. It has to stay open. |
-| Page loads but panels are empty | Backend up but UI not built - run `npm run build -- --prod`, then restart uvicorn. |
+| Page loads but panels are empty | Backend up but UI not built - run `npm run build`, then restart uvicorn. |

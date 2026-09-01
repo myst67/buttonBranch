@@ -1,0 +1,100 @@
+<div class="panel">
+  <div class="panel-head">
+    <h2><span class="step">1</span> Last month's roster</h2>
+    <p class="hint">Drop the sheet you send on the last day of the month - .xlsx, .csv or .json.
+      Every upload is kept and the model retrains on all of them.</p>
+  </div>
+
+  <div class="dropzone" [class.dragging]="dragging()" [class.busy]="busy()"
+       (dragover)="onDragOver($event)" (dragleave)="dragging.set(false)" (drop)="onDrop($event)">
+    <input type="file" id="rosterFile" accept=".xlsx,.xls,.csv,.json"
+           (change)="onFile($any($event.target).files)" [disabled]="busy()">
+    <label for="rosterFile">
+      <strong>{{ busy() ? 'Reading and training...' : 'Choose a file' }}</strong>
+      @if (!busy()) {
+        <span>or drag it here</span>
+        @if (fileName()) {
+          <span class="filename">{{ fileName() }}</span>
+        }
+      }
+    </label>
+  </div>
+
+  <div class="field">
+    <label for="monthOverride">Month of the uploaded sheet (optional)</label>
+    <input id="monthOverride" type="text" placeholder="2025-06" name="monthOverride"
+           [(ngModel)]="monthOverride">
+    <span class="hint">Only needed when the sheet's headers do not say which month it is.</span>
+  </div>
+
+  @if (error(); as message) {
+    <div class="alert error">{{ message }}</div>
+  }
+
+  @if (result(); as parsed) {
+    @if (parsed.ready) {
+      <div class="alert ok">
+        Read <strong>{{ parsed.employees.length }}</strong> employees over
+        <strong>{{ parsed.clients.length }}</strong> clients for
+        <strong>{{ parsed.month_label }}</strong>. Ready to build
+        <strong>{{ parsed.target_month }}</strong>.
+      </div>
+    } @else {
+      <div class="alert error">
+        <strong>This team cannot be rostered yet:</strong>
+        <ul>
+          @for (blocker of parsed.blockers; track blocker) {
+            <li>{{ blocker }}</li>
+          }
+        </ul>
+      </div>
+    }
+
+    @if (parsed.warnings.length) {
+      <details class="warnings">
+        <summary>{{ parsed.warnings.length }} thing(s) the parser had to interpret</summary>
+        <ul>
+          @for (warning of parsed.warnings; track warning) {
+            <li>{{ warning }}</li>
+          }
+        </ul>
+      </details>
+    }
+
+    <details class="parsed">
+      <summary>What was read from the sheet</summary>
+      <table>
+        <thead>
+          <tr><th>Name</th><th>Clients</th><th>Shift worked</th><th>Week off</th></tr>
+        </thead>
+        <tbody>
+          @for (employee of parsed.employees; track employee.name) {
+            <tr>
+              <td>{{ employee.name }}</td>
+              <td class="muted">{{ employee.clients.join(', ') }}</td>
+              <td><span class="pill" [class]="'pill ' + employee.shift">{{ employee.shift }}</span></td>
+              <td class="muted">{{ offLabel(employee) }}</td>
+            </tr>
+          }
+        </tbody>
+      </table>
+    </details>
+  }
+
+  @if (history().length) {
+    <div class="history">
+      <h3>Stored history</h3>
+      <ul>
+        @for (month of history(); track month.month) {
+          <li>
+            <span class="month">{{ month.month_label }}</span>
+            <span class="muted">{{ month.employees }} employees, {{ month.clients }} clients,
+              {{ month.with_off_pattern }} week-off patterns</span>
+            <button type="button" class="link" (click)="remove.emit(month.month)"
+                    [disabled]="busy()">remove</button>
+          </li>
+        }
+      </ul>
+    </div>
+  }
+</div>

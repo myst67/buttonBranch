@@ -46,3 +46,7 @@ backend/data/history/
 backend/data/models/
 backend/data/exports/
 .pytest_cache/
+
+# angular cli build cache (Angular 12+)
+/.angular/cache
+.angular/
