@@ -32,8 +32,9 @@ repository rather than exporting real records.
 ```
 [ Cron trigger: daily at 11:55 ]
         |
-[ Search Records ]  ->  CIM application            (already built)
-        |   records
+[ Search Records ]  ->  CIM app, day activity           (already built)
+[ Search Records ]  ->  CIM app, open backlog, no date filter
+        |   records + backlog_records
 [ Python: Script A - normalize and classify ]
         |   records, period, coverage, summary
 [ If summary.has_records is false -> stop ]
@@ -50,6 +51,11 @@ repository rather than exporting real records.
 Three Python actions. Script A owns the field mapping, Script B owns the
 arithmetic, Script C owns the storage shape. That split means a CIM field rename
 only ever touches Script A.
+
+The backlog search is not optional. A one-day slice cannot measure the open
+backlog, because backlog is a stock rather than a flow. Where the fetched data
+cannot support a base, Script B stores those metrics as null with a reason
+instead of computing them from a partial fetch.
 
 ---
 

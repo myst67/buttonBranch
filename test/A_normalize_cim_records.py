@@ -5,7 +5,13 @@ action's output, so this is the only script that knows your CIM column names.
 
 Inputs
 ------
-records                  raw CIM records from the Search Records action
+records                  raw CIM records from the day's Search Records action
+backlog_records          optional second search: every record still open, with
+                         no date filter. Required for the open-base metrics,
+                         because a one-day slice cannot measure a backlog
+data_scope               auto | full | day_created | day_updated |
+                         day_plus_backlog  (default auto). Auto never assumes
+                         "full"; declare it when the search has no date filter
 period_mode              today | full_today | yesterday | date   (default today)
 snapshot_date            ISO date, required when period_mode is "date"; also used
                          on its own to re-run a past day
@@ -24,7 +30,8 @@ Outputs
 -------
 records   canonical records carrying in_open / in_new / in_closed
 period    start, end, date, key - the day this snapshot is for
-coverage  which canonical fields resolved, what was skipped, suspect durations
+coverage  which canonical fields resolved, what was skipped, suspect durations,
+          and which metric bases the fetched data can actually measure
 summary   counts, so the playbook can stop early on an empty day
 """
 
@@ -534,6 +541,57 @@ def _duration(record, fields, text_key, minutes_key, cap):
     return minutes, False
 
 
+#: What each scope can honestly measure. A base that is not measurable has its
+#: metrics stored as null with a reason, rather than a number computed from a
+#: slice of data that cannot support it.
+SCOPE_RULES = {
+    "full": (True, True, "search returns all records"),
+    "day_plus_backlog": (True, True, "day slice plus a full open-backlog search"),
+    "day_updated": (False, True,
+                    "search returns one day filtered on last-updated, so records "
+                    "left untouched today are absent and the backlog is unknown"),
+    "day_created": (False, False,
+                    "search returns one day filtered on created date, so neither "
+                    "the standing backlog nor older records closed today are present"),
+}
+
+
+def resolve_scope(declared, has_backlog, records, start):
+    """Work out what the fetched data can support, if it was not declared.
+
+    Auto-detection never concludes "full". A day search filtered on last-updated
+    returns records created months ago, so a full search and a one-day slice look
+    identical from the data alone. Guessing "full" would silently compute a
+    backlog from a partial fetch, which is the one failure worth designing out,
+    so ``full`` has to be declared deliberately.
+    """
+    declared = (declared or "auto").strip().lower()
+    if declared in SCOPE_RULES:
+        return declared
+    if has_backlog:
+        return "day_plus_backlog"
+    if records and all((parse_datetime(r.get("created_at")) or start) >= start
+                       for r in records):
+        return "day_created"
+    return "day_updated"
+
+
+def dedupe(records):
+    """One row per record when the two searches overlap; newest update wins."""
+    best = {}
+    for record in records:
+        key = record.get("tracking_id") or record.get("alert_uid")
+        current = best.get(key)
+        if current is None:
+            best[key] = record
+            continue
+        a = parse_datetime(record.get("updated_at"))
+        b = parse_datetime(current.get("updated_at"))
+        if a is not None and (b is None or a > b):
+            best[key] = record
+    return list(best.values())
+
+
 def normalize(raw_records, options):
     fields = merge_field_map(options.get("field_map"))
     closed_statuses = options.get("closed_statuses") or DEFAULT_CLOSED_STATUSES
@@ -690,7 +748,7 @@ def _to_number(value):
         return None
 
 
-def build_coverage(records, skipped, suspect_durations, filtered_out):
+def build_coverage(records, skipped, suspect_durations, filtered_out, scope):
     """Which canonical fields actually carried data, so Script B can be honest.
 
     A field that resolved on no record at all is reported missing, and every
@@ -709,7 +767,14 @@ def build_coverage(records, skipped, suspect_durations, filtered_out):
             present.append(field)
         else:
             missing.append(field)
+    open_ok, closed_ok, note = SCOPE_RULES[scope]
     return {
+        "scope": {
+            "data_scope": scope,
+            "open_base_measurable": open_ok,
+            "closed_base_measurable": closed_ok,
+            "note": note,
+        },
         "fields_present": present,
         "fields_missing": missing,
         "records_in": len(records) + len(skipped) + filtered_out,
@@ -741,9 +806,16 @@ def main(context=None):
         "suspect_minutes_over": get_input(context, "suspect_minutes_over"),
     }
 
+    day_records = _as_list(get_input(context, "records", []))
+    backlog_records = _as_list(get_input(context, "backlog_records", []))
+
     records, skipped, suspect, filtered = normalize(
-        get_input(context, "records", []), options)
-    coverage = build_coverage(records, skipped, suspect, filtered)
+        day_records + backlog_records, options)
+    records = dedupe(records)
+
+    scope = resolve_scope(get_input(context, "data_scope", "auto"),
+                          bool(backlog_records), records, start)
+    coverage = build_coverage(records, skipped, suspect, filtered, scope)
 
     return {
         "records": records,

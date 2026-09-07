@@ -22,8 +22,10 @@ component, lift that block out of all three and reference the component instead.
 ```
 [ Cron trigger: daily at 11:55 ]
         |
-[ Search Records ]  ->  CIM application
-        |   records
+        +-- [ Search Records ] -> CIM app, activity in the last day
+        |         |   records
+        +-- [ Search Records ] -> CIM app, Status NOT IN closed  (no date filter)
+                  |   backlog_records
 [ Python: Script A ]          ->  records, period, coverage, summary
         |
 [ If summary.has_records is false -> stop ]
@@ -36,6 +38,51 @@ component, lift that block out of all three and reference the component instead.
         |
 [ If action == "update" -> Update Record ] [ Else -> Create Record ]
 ```
+
+---
+
+## Two searches, not one
+
+A one-day search cannot measure the open backlog. Backlog is a stock, not a
+flow: it is every record still open today regardless of when it was created, so
+a slice of today's rows has no way to see a case opened three weeks ago. Fed a
+day slice, the naive answer is not slightly off, it collapses. In a test where
+the true backlog was 4 records with the oldest at 68 days, a today-only search
+reported 1 record with the oldest at 0.67 days.
+
+So the playbook runs **two** Search Records actions into Script A:
+
+| Search | Filter | Feeds |
+| --- | --- | --- |
+| Day activity | last updated within the day | `records` |
+| Open backlog | Status NOT IN your closed statuses, **no date filter** | `backlog_records` |
+
+Script A merges them and removes the overlap, keeping the copy with the later
+Last Updated, so a record appearing in both is counted once.
+
+### If you only wire one search
+
+Script A works out what the fetched data can support and reports it in
+`coverage.scope`. Script B then stores every metric that data cannot answer as
+**null with a reason**, rather than computing a number from a slice that cannot
+support it. With a single day search, that suppresses the 12 open-base metrics
+and tells you to add the backlog search.
+
+Auto-detection never concludes that a search was full. A day search filtered on
+last-updated returns records created months ago, so a full search and a day
+slice look identical from the data alone, and guessing wrong would silently
+report a backlog computed from a partial fetch. If your search genuinely has no
+date filter, declare it by setting `data_scope` to `full`.
+
+| `data_scope` | Open base | Closed base |
+| --- | --- | --- |
+| `full` | measured | measured |
+| `day_plus_backlog` | measured | measured |
+| `day_updated` | null + reason | measured |
+| `day_created` | null + reason | null + reason |
+
+`day_created` suppresses the closed base too, because a search filtered on
+created date cannot see a record opened last week and closed today.
 
 ---
 
@@ -79,7 +126,9 @@ Script A carries all the configuration. B and C only need A's outputs.
 
 | Input | Purpose |
 | --- | --- |
-| `records` | output of the CIM Search Records action |
+| `records` | output of the day-activity Search Records action |
+| `backlog_records` | output of the open-backlog search, no date filter |
+| `data_scope` | `auto`, `full`, `day_plus_backlog`, `day_updated`, `day_created` |
 | `period_mode` | `today`, `full_today`, `yesterday` or `date` |
 | `snapshot_date` | the day to run, when re-running a past day |
 | `now` | pin the run time, for reproducible re-runs |
@@ -92,8 +141,9 @@ Script A carries all the configuration. B and C only need A's outputs.
 | `record_hierarchy_filter` | keep only parent rows, or only child rows |
 | `suspect_minutes_over` | duration above which a value is treated as bad data |
 
-Only `records` is required. Everything else has a default, and the defaults are
-listed at the top of the helper block in each script.
+Only `records` is required, but without `backlog_records` the open-base metrics
+are suppressed. Everything else has a default, listed at the top of the helper
+block in each script.
 
 ---
 

@@ -510,11 +510,17 @@ PROXY_NOTE = {
 class Catalog(object):
     """Collects metrics with their kind and availability in one place."""
 
-    def __init__(self, available_fields):
+    def __init__(self, available_fields, unmeasurable_bases=None):
         self.available = set(available_fields or [])
+        # A base the fetched data cannot support, e.g. the open backlog when the
+        # search only returned one day. Its metrics are nulled rather than
+        # computed from data that cannot answer them.
+        self.unmeasurable_bases = unmeasurable_bases or {}
         self.metrics = {}
 
-    def _blocked_reason(self, key):
+    def _blocked_reason(self, key, base):
+        if base in self.unmeasurable_bases:
+            return self.unmeasurable_bases[base]
         if key in NEEDS_HISTORY:
             return "needs {}".format(NEEDS_HISTORY[key])
         needed = REQUIRED_FIELD.get(key)
@@ -524,7 +530,7 @@ class Catalog(object):
 
     def add(self, key, base, kind, compute):
         """Store one metric, or null it out when its source field is missing."""
-        reason = self._blocked_reason(key)
+        reason = self._blocked_reason(key, base)
         if reason:
             self.metrics[key] = {"value": None, "base": base, "kind": kind,
                                  "status": "unavailable", "reason": reason}
@@ -552,6 +558,26 @@ class Catalog(object):
         }
 
 
+def _unmeasurable_bases(coverage):
+    """Bases the fetched data cannot support, from Script A's scope report."""
+    scope = (coverage or {}).get("scope") or {}
+    if not scope:
+        return {}
+    blocked = {}
+    if scope.get("open_base_measurable") is False:
+        blocked["open"] = ("the search did not return the standing backlog: {}. "
+                           "Add a second Search Records action with no date "
+                           "filter for records still open, and pass it to "
+                           "Script A as backlog_records."
+                           .format(scope.get("note", "one-day slice")))
+    if scope.get("closed_base_measurable") is False:
+        blocked["closed"] = ("the search cannot see every record closed in the "
+                             "window: {}. Filter the day search on last-updated "
+                             "rather than created date."
+                             .format(scope.get("note", "one-day slice")))
+    return blocked
+
+
 def compute_catalog(records, coverage=None, top_n=10):
     records = records or []
     available = set((coverage or {}).get("fields_present") or [])
@@ -563,7 +589,7 @@ def compute_catalog(records, coverage=None, top_n=10):
     fp_closed = [r for r in closed_base if r.get("is_false_positive")]
     resolved_closed = [r for r in closed_base if r.get("is_truly_resolved")]
 
-    cat = Catalog(available)
+    cat = Catalog(available, _unmeasurable_bases(coverage))
 
     # ---- open base ------------------------------------------------------
     cat.add("open_inc_total", "open", "count", lambda: len(open_base))
