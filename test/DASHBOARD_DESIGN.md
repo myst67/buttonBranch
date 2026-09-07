@@ -36,7 +36,7 @@ One Swimlane application, one record per day, keyed on `Snapshot Date`.
 | | |
 | --- | --- |
 | Grain | one day |
-| Key | `Snapshot Date`, unique |
+| Key | `Snapshot Key` (text, e.g. `2026-09-07`), unique |
 | Volume | 365 records a year, trivial for Swimlane and for a widget to fetch |
 | Written by | the three metric scripts, through Create or Update Record |
 | Re-run | same date updates that day's record, never adds a second |
@@ -62,7 +62,7 @@ not on JSON. Give every metric a numeric field:
 
 | Group | Fields |
 | --- | --- |
-| Key | Snapshot Date (date, unique), Run Status (text) |
+| Key | Snapshot Key (text, unique), Snapshot Date (date), Run Status (text) |
 | Flow counts | New Inc Total, New Inc P1P2 Count, Closed Inc Total, Closed Inc Not Resolved, Closed Inc Same Day Open, False Positive Count, False Positive High Risk Count, True Positive Count |
 | Stock counts | Open Inc Total, Open More Than Five Days, Open More Than Thirty Days, Stale Open No Update 5d, Unassigned Open Count, Distinct Agents |
 | Distributions | for each: `<name> Avg`, `<name> Sum`, `<name> Count`, `<name> P90` |
