@@ -46,9 +46,15 @@ links them, and it is optional: pass Script B's `new_inc_total` and Script C's
 
 ## If the action shows no output
 
-Turbine collects a Python action's result differently across versions, so each
-script publishes its values four ways and one of them will be the one your
-tenant reads:
+The scripts **run as soon as the file is executed**, whether or not the sandbox
+supplies a `context`. That matters for diagnosis: with no inputs bound the counts
+come back as zero, so a result full of zeros proves the script ran and points at
+the input binding, while a result of `{}` means the file never executed.
+
+Inputs are found three ways: a `context` object or dict, a bare `inputs` dict, or
+each input injected as its own global variable.
+
+The result is then published four ways, one of which your tenant will read:
 
 * returned from `main(context)`
 * exposed as a module-level `outputs`
@@ -72,15 +78,18 @@ type that fits.
 
 If an action still produces nothing, work through these in order:
 
-1. **Are the outputs declared?** Some tenants only surface output keys that are
+1. **Does the action's Inputs panel show `{}`?** Then nothing was passed in.
+   Define an input named `records` on the action and map it to the search
+   result. This is separate from the output problem and has to be fixed too.
+2. **Are the outputs declared?** Some tenants only surface output keys that are
    declared in the action's output schema. Add the keys you want to map, for
    example `open_inc_total`, spelled exactly as the script returns them.
-2. **Is the input named `records`?** The script reads its inputs by name. An
+3. **Is the input named `records`?** The script reads its inputs by name. An
    input bound correctly but named `record` or `results` reads as empty, and the
    script returns zeros rather than failing.
-3. **Check `coverage` in the result.** `rows_fetched` tells you whether the
+4. **Check `coverage` in the result.** `rows_fetched` tells you whether the
    records arrived at all. Zero means the binding, not the script.
-4. **Was the whole file pasted?** Each script is one file, helper block included.
+5. **Was the whole file pasted?** Each script is one file, helper block included.
    Pasting only the part below the helper banner leaves the helpers undefined.
 
 ---

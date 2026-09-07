@@ -747,16 +747,54 @@ def emit_outputs(result):
     return result
 
 
-def run_if_sandbox_supplied_context(entry):
-    """Call ``entry`` when the sandbox executes this file with a context in scope.
+#: Input names this script understands, used when the sandbox injects inputs as
+#: plain globals rather than through a context object.
+KNOWN_INPUT_NAMES = [
+    "records", "open_records", "new_records", "closed_records", "backlog_records",
+    "period_mode", "snapshot_date", "now", "field_map", "closed_statuses",
+    "resolved_statuses", "false_positive_values", "false_positive_fields",
+    "p1p2_values", "record_hierarchy_filter", "suspect_minutes_over",
+    "previous_open_backlog", "previous_snapshot_date", "new_inc_total",
+    "closed_inc_total", "base_assignment", "data_scope", "top_n",
+]
 
-    A tenant that calls main() itself is unaffected: this simply runs first and
-    publishes the same values.
+
+def resolve_context():
+    """Find the inputs however this sandbox chose to hand them over.
+
+    Three conventions are covered: a ``context`` object or dict, a bare
+    ``inputs`` dict, and each input injected as its own global variable. If none
+    of them is present the script still runs, on empty inputs, so the action
+    produces its full set of keys instead of nothing.
     """
     scope = globals()
-    if "context" in scope:
-        return emit_outputs(entry(scope["context"]))
-    return None
+    if "context" in scope and scope["context"] is not None:
+        return scope["context"]
+    if isinstance(scope.get("inputs"), dict):
+        return {"inputs": scope["inputs"]}
+    injected = {name: scope[name] for name in KNOWN_INPUT_NAMES if name in scope}
+    return {"inputs": injected}
+
+
+def run_on_import(entry):
+    """Run the action as soon as the file is executed, and publish the result.
+
+    This runs unconditionally rather than only when a context is present. An
+    action whose result comes back empty cannot be told apart from one that
+    never ran, so the script always produces its keys: with no inputs the
+    counts are zero, which at least proves it executed.
+
+    A tenant that also calls main() itself is unaffected. The work is pure
+    computation over the inputs, so running twice costs a little time and
+    changes nothing.
+    """
+    try:
+        return emit_outputs(entry(resolve_context()))
+    except Exception as error:  # never fail silently: report it as the result
+        return emit_outputs({
+            "error": "{}: {}".format(type(error).__name__, error),
+            "snapshot_date": None,
+        })
 
 # ==========================================================================
 # end shared helper block
@@ -885,14 +923,16 @@ def main(context=None):
 # ======================================================================
 # Entry point
 # ======================================================================
-# Turbine collects an action's output differently across versions, so the
-# result is published every way: returned from main(), exposed as a
-# module-level `outputs`, and written to context.outputs. The aliases cover
-# tenants that expect a differently named entry function.
+# The action runs as soon as this file is executed, whether or not the sandbox
+# supplies a `context`, and the result is published every way Turbine might
+# collect it: returned from main(), exposed as a module-level `outputs`, and
+# written to context.outputs. The aliases cover tenants that expect a
+# differently named entry function. With no inputs bound the counts come back
+# as zero, which still proves the script ran.
 
 script = main
 run = main
 execute = main
 handler = main
 
-run_if_sandbox_supplied_context(main)
+run_on_import(main)
