@@ -68,6 +68,7 @@ One key: `metrics`. Every entry has the same shape.
   "kind": "count",
   "status": "ok",
   "reason": null,
+  "description": "Records still open at the end of the day.",
   "breakdown": [
     {"dimension": "severity",    "label": "Critical",    "count": 1},
     {"dimension": "severity",    "label": "High",        "count": 1},
@@ -77,6 +78,10 @@ One key: `metrics`. Every entry has the same shape.
   ]
 }
 ```
+
+`description` is a one-line explanation of the metric, so a tile or tooltip
+does not need its own copy of the wording. It is present even when the metric is
+unavailable, so the UI can still say what the number would have meant.
 
 `breakdown` is a flat array. Every row carries the dimension it came from, so a
 widget filters to one dimension with `rows.filter(r => r.dimension === 'severity')`

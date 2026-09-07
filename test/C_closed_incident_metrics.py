@@ -844,6 +844,65 @@ BREAKDOWN_DIMENSIONS = ["severity", "status", "assigned_to", "classification",
                         "threat_type", "type"]
 
 
+#: One line per metric, carried in the output so a tile or tooltip can explain
+#: itself without the widget hard-coding the wording.
+METRIC_DESCRIPTIONS = {
+    # Open base
+    "open_inc_total": "Records still open at the end of the day.",
+    "open_more_than_five_days": "Open records raised more than 5 days ago.",
+    "open_more_than_thirty_days": "Open records raised more than 30 days ago.",
+    "stale_open_no_update_5d": "Open records not touched in more than 5 days.",
+    "unassigned_open_count": "Open records with nobody assigned.",
+    "distinct_agents": "Distinct owners holding open records.",
+    "oldest_open_age": "Age in days of the oldest open record.",
+    "age_open_inc": "Age in days of each open record, measured at the end of the day.",
+    "age_last_update_open_inc": "Days since each open record was last updated.",
+    "state_dwell_hours": "Hours each open record has sat without a change.",
+    "reassign_count_open_inc": "Times each open record has been reassigned.",
+    "reassigned_open_count": "Open records reassigned at least once.",
+    "reassign_count_hist_open": "Reassignments per open record, from assignment history.",
+
+    # New base
+    "new_inc_total": "Records created during the day.",
+    "new_inc_p1p2_count": "New records at P1 or P2 severity.",
+    "new_inc_escalated_count": "New records flagged as escalated.",
+    "new_inc_acknowledged_count": "New records with an acknowledgement time recorded.",
+    "mtta_minutes": "Minutes from creation to acknowledgement.",
+    "mtta_hours": "Hours from creation to acknowledgement.",
+    "sla_breached_count": "New records that breached their SLA.",
+    "sla_breach_rate": "Percentage of new records that breached SLA.",
+    "sla_compliance_rate": "Percentage of new records that met SLA.",
+
+    # Closed base
+    "closed_inc_total": "Records closed during the day.",
+    "closed_inc_not_resolved": "Closed records whose status is not a resolved one.",
+    "closed_inc_same_day_open": "Records opened and closed on the same day.",
+    "closed_inc_on_first_attempt": "Closed records that were never reassigned.",
+    "false_positive_count": "Closed records judged false positive.",
+    "false_positive_high_risk_count": "False positives at P1 or P2 severity.",
+    "true_positive_count": "Closed records genuinely resolved, false positives excluded.",
+    "duration_closed_inc": "Hours from creation to closure.",
+    "duration_false_positive_closed_inc": "Hours from creation to closure, false positives only.",
+    "mttr_hours": "Hours from creation to closure, genuinely resolved records only.",
+    "risk_score_closed_inc": "Risk score of each closed record.",
+    "risk_score_false_positive_inc": "Risk score of closed false positives.",
+    "risk_score_high_risk_fp_inc": "Risk score of P1 or P2 false positives.",
+    "fp_rate": "Percentage of closed records that were false positives.",
+    "same_day_close_rate": "Percentage of closed records opened and closed the same day.",
+    "true_positive_rate": "Percentage of closed records genuinely resolved.",
+    "first_close_rate": "Percentage of closed records never reassigned.",
+
+    # Continuity, carried alongside the metrics
+    "snapshot_date": "The day these metrics describe.",
+    "is_seed_day": "True on the first run, which seeds the backlog series.",
+    "expected_open_backlog": "Yesterday's backlog plus today's new, minus today's closed.",
+    "backlog_drift": "Measured backlog minus expected. Normally zero.",
+    "series_continuous": "False when a day is missing between this record and the last.",
+    "days_since_previous": "Days since the previous record. One on a healthy series.",
+    "continuity_note": "How the expected backlog was arrived at.",
+}
+
+
 def count_breakdown(records, dims=None, top=10):
     """Compose a count metric as a flat array of rows.
 
@@ -913,10 +972,17 @@ def shape_output(metrics, extras=None, coverage=None, include_coverage=False):
     them, so everything in the output is a metric. Coverage stays out unless
     asked for; it is diagnostics, not a metric.
     """
-    combined = dict(metrics)
+    combined = {}
+    for key, entry in metrics.items():
+        combined[key] = dict(entry)
     for key, value in (extras or {}).items():
         combined[key] = {"value": value, "kind": "info", "status": "ok",
                          "reason": None, "breakdown": []}
+
+    # Every entry explains itself, so a tile or tooltip does not have to carry
+    # its own copy of the wording.
+    for key, entry in combined.items():
+        entry["description"] = METRIC_DESCRIPTIONS.get(key, "")
 
     result = {"metrics": combined}
     if include_coverage and coverage is not None:
