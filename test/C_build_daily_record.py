@@ -503,6 +503,10 @@ TILE_SPEC = [
     ("distinct_agents", "Active Owners", None, "neutral"),
 ]
 
+#: Shown next to the backlog tile so a mismatch with yesterday is visible.
+CONTINUITY_KEYS = ["expected_open_backlog", "drift", "days_since_previous",
+                   "is_seed_day", "continuous", "note"]
+
 
 def _title(key):
     """open_more_than_five_days -> Open More Than Five Days."""
@@ -522,11 +526,20 @@ def _tile_value(entry):
 def build_fields(metrics, coverage=None, prefix="", include_payload=True):
     metrics = metrics or {}
     catalog = metrics.get("catalog", {})
+    continuity = metrics.get("continuity") or {}
     fields = {
         "Snapshot Date": metrics.get("snapshot_date"),
         "Period Start": metrics.get("period", {}).get("start"),
         "Period End": metrics.get("period", {}).get("end"),
         "Run Status": "Success",
+        # Feed Previous Open Backlog back into Script B tomorrow, so each day
+        # checks its measured backlog against yesterday's carry-forward.
+        "Previous Open Backlog": continuity.get("previous_open_backlog"),
+        "Expected Open Backlog": continuity.get("expected_open_backlog"),
+        "Backlog Drift": continuity.get("drift"),
+        "Days Since Previous": continuity.get("days_since_previous"),
+        "Is Seed Day": continuity.get("is_seed_day"),
+        "Series Continuous": continuity.get("continuous"),
     }
 
     for key in sorted(catalog):
@@ -577,9 +590,11 @@ def build_dashboard(metrics):
         for name, rows in breakdowns.items()
     ]
 
+    continuity = metrics.get("continuity") or {}
     return {
         "title": "CIM Daily KPI",
         "snapshot_date": metrics.get("snapshot_date"),
+        "continuity": {k: continuity.get(k) for k in CONTINUITY_KEYS},
         "tiles": tiles,
         "charts": charts,
         "tables": [{

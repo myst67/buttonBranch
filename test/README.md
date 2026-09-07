@@ -133,6 +133,48 @@ To backfill or correct a past day, run the playbook with `period_mode` set to
 
 ---
 
+## Day-on-day backlog
+
+The backlog recurrence is:
+
+```
+open_today = open_yesterday + new_today - closed_today
+```
+
+**Closures have to be subtracted.** Carrying yesterday's backlog forward and
+only adding today's new records makes the number rise every day and never fall.
+On a normal ten-day stretch that reads 60 against a true backlog of 12, and the
+gap keeps widening.
+
+You do not actually need the recurrence to know the backlog. The open search
+measures it directly every day, which is why `open_inc_total` comes from that
+search. The recurrence is used as a **check**: pass yesterday's stored
+`Open Inc Total` into Script B as `previous_open_backlog`, with yesterday's
+`Snapshot Date` as `previous_snapshot_date`, and each run reconciles the two.
+
+| Stored field | Meaning |
+| --- | --- |
+| `Open Inc Total` | measured directly by the open search |
+| `Expected Open Backlog` | previous + new - closed |
+| `Backlog Drift` | measured minus expected, normally 0 |
+| `Is Seed Day` | true on the first run, which seeds the series |
+| `Days Since Previous` | 1 on a healthy series |
+| `Series Continuous` | false when a day was missed |
+
+On the first run, 1 Sept in your case, omit `previous_open_backlog`. That day is
+the seed: the measured backlog is stored as-is and `Is Seed Day` is true. Every
+day after that is checked against it.
+
+A non-zero drift is worth a look. It usually means a record was closed
+retroactively, a status changed outside the window, or a search missed rows. It
+is reported rather than smoothed away.
+
+If the cron misses a day, the carry-forward is not valid across the gap, so
+`Series Continuous` goes false and no expected value is produced. Backfill the
+missing days with `period_mode: date` and `snapshot_date` set to each one.
+
+---
+
 ## Idempotency
 
 The record is keyed on `snapshot_date`. Script C emits `period_key` (the date)
@@ -153,6 +195,8 @@ Script A carries all the configuration. B and C only need A's outputs.
 | `closed_records` | the closed-today search |
 | `records` | a single mixed search, if not using per-base searches |
 | `base_assignment` | `auto` (trust each search), `search`, or `condition` |
+| `previous_open_backlog` | yesterday's `Open Inc Total`, omit on the first run |
+| `previous_snapshot_date` | yesterday's `Snapshot Date` |
 | `data_scope` | `auto`, `full`, `day_plus_backlog`, `day_updated`, `day_created` |
 | `period_mode` | `today`, `full_today`, `yesterday` or `date` |
 | `snapshot_date` | the day to run, when re-running a past day |

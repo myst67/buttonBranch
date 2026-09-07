@@ -43,6 +43,7 @@ repository rather than exporting real records.
 [ Python: Script B - compute the metric catalog ]
         |   metrics, coverage
 [ Search Records ]  ->  KPI app, Snapshot Date == metrics.snapshot_date
+[ Search Records ]  ->  KPI app, yesterday's record, for previous_open_backlog
         |
 [ Python: Script C - build the storage payload ]
         |   fields, action, record_id
@@ -303,6 +304,7 @@ Script C:
 | Group | Fields |
 | --- | --- |
 | Key | Snapshot Date, Period Start, Period End, Run Status |
+| Continuity | Previous Open Backlog, Expected Open Backlog, Backlog Drift, Days Since Previous, Is Seed Day, Series Continuous |
 | Counts | one numeric field per count metric (15) |
 | Rates | one numeric field per rate metric, stored as a percentage |
 | Values | `Avg`, `Sum`, `P90`, `Count` per value metric |

@@ -10,10 +10,15 @@ records   Script A's records
 period    Script A's period
 coverage  Script A's coverage
 top_n     rows to keep in each breakdown table (default 10)
+previous_open_backlog   yesterday's Open Inc Total, from the previous KPI
+                        record. Omit on the first run to seed the series
+previous_snapshot_date  yesterday's Snapshot Date, used to prove the series
+                        has no gap
 
 Outputs
 -------
-metrics   the catalog: value, kind and status for every metric
+metrics   the catalog, plus a continuity block reconciling the measured
+          backlog against the day-on-day carry-forward
 coverage  Script A's coverage plus a per-metric availability roll-up
 """
 
@@ -578,6 +583,91 @@ def _unmeasurable_bases(coverage):
     return blocked
 
 
+def build_continuity(catalog, snapshot_date, previous_open, previous_date):
+    """Reconcile the measured backlog with yesterday's, and report any drift.
+
+    The backlog recurrence is:
+
+        open_today = open_yesterday + new_today - closed_today
+
+    Closures have to be subtracted. Carrying yesterday's backlog forward and
+    only adding today's new records makes the number rise every day and never
+    fall, so it stops describing the backlog within a week.
+
+    The carry-forward is a check, not the source of truth: the open search
+    measures the backlog directly every day. A non-zero drift means the two
+    disagree, which usually points at records closed retroactively, a changed
+    status, or a search that missed rows - all worth seeing rather than hiding.
+    """
+    def value_of(key):
+        entry = catalog.get(key) or {}
+        return entry.get("value")
+
+    measured = value_of("open_inc_total")
+    new_count = value_of("new_inc_total")
+    closed_count = value_of("closed_inc_total")
+
+    previous_open = None if previous_open in (None, "") else float(previous_open)
+    today = parse_datetime(snapshot_date)
+    yesterday = parse_datetime(previous_date)
+    gap_days = None
+    if today is not None and yesterday is not None:
+        gap_days = (today.date() - yesterday.date()).days
+
+    if previous_open is None:
+        return {
+            "is_seed_day": True,
+            "previous_open_backlog": None,
+            "previous_snapshot_date": previous_date,
+            "days_since_previous": gap_days,
+            "expected_open_backlog": None,
+            "measured_open_backlog": measured,
+            "drift": None,
+            "continuous": True,
+            "note": ("first run: the measured backlog seeds the series, and "
+                     "every later day is checked against it"),
+        }
+
+    if gap_days is not None and gap_days != 1:
+        return {
+            "is_seed_day": False,
+            "previous_open_backlog": previous_open,
+            "previous_snapshot_date": previous_date,
+            "days_since_previous": gap_days,
+            "expected_open_backlog": None,
+            "measured_open_backlog": measured,
+            "drift": None,
+            "continuous": False,
+            "note": ("the previous record is {} days back, so the carry-forward "
+                     "cannot be checked: the days in between were never "
+                     "recorded. Backfill them with period_mode 'date'."
+                     .format(gap_days)),
+        }
+
+    expected = None
+    drift = None
+    if None not in (new_count, closed_count):
+        expected = previous_open + new_count - closed_count
+        if measured is not None:
+            drift = round(measured - expected, 2)
+
+    return {
+        "is_seed_day": False,
+        "previous_open_backlog": previous_open,
+        "previous_snapshot_date": previous_date,
+        "days_since_previous": gap_days,
+        "expected_open_backlog": expected,
+        "measured_open_backlog": measured,
+        "drift": drift,
+        "continuous": True,
+        "note": ("expected = previous {} + new {} - closed {}"
+                 .format(previous_open, new_count, closed_count)
+                 if expected is not None else
+                 "carry-forward needs the new and closed counts, which this "
+                 "run could not measure"),
+    }
+
+
 def compute_catalog(records, coverage=None, top_n=10):
     records = records or []
     available = set((coverage or {}).get("fields_present") or [])
@@ -701,10 +791,16 @@ def main(context=None):
         int(get_input(context, "top_n", 10)),
     )
     coverage["metrics"] = cat.roll_up()
+    continuity = build_continuity(
+        cat.metrics, period.get("date"),
+        get_input(context, "previous_open_backlog"),
+        get_input(context, "previous_snapshot_date"),
+    )
 
     return {
         "metrics": {
             "snapshot_date": period.get("date"),
+            "continuity": continuity,
             "period": {"start": period.get("start"), "end": period.get("end")},
             "catalog": cat.metrics,
             "base_counts": extras["base_counts"],
