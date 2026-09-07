@@ -32,9 +32,10 @@ repository rather than exporting real records.
 ```
 [ Cron trigger: daily at 11:55 ]
         |
-[ Search Records ]  ->  CIM app, day activity           (already built)
-[ Search Records ]  ->  CIM app, open backlog, no date filter
-        |   records + backlog_records
+[ Search Records ]  ->  open: Status NOT IN closed, no date filter
+[ Search Records ]  ->  new: created today
+[ Search Records ]  ->  closed: closed today
+        |   open_records + new_records + closed_records
 [ Python: Script A - normalize and classify ]
         |   records, period, coverage, summary
 [ If summary.has_records is false -> stop ]

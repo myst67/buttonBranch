@@ -22,10 +22,12 @@ component, lift that block out of all three and reference the component instead.
 ```
 [ Cron trigger: daily at 11:55 ]
         |
-        +-- [ Search Records ] -> CIM app, activity in the last day
-        |         |   records
-        +-- [ Search Records ] -> CIM app, Status NOT IN closed  (no date filter)
-                  |   backlog_records
+        +-- [ Search Records ] -> Status NOT IN closed, NO date filter
+        |         |   open_records
+        +-- [ Search Records ] -> created today
+        |         |   new_records
+        +-- [ Search Records ] -> closed today
+                  |   closed_records
 [ Python: Script A ]          ->  records, period, coverage, summary
         |
 [ If summary.has_records is false -> stop ]
@@ -50,15 +52,35 @@ day slice, the naive answer is not slightly off, it collapses. In a test where
 the true backlog was 4 records with the oldest at 68 days, a today-only search
 reported 1 record with the oldest at 0.67 days.
 
-So the playbook runs **two** Search Records actions into Script A:
+So run **one search per base** and pass each to its own input:
 
 | Search | Filter | Feeds |
 | --- | --- | --- |
-| Day activity | last updated within the day | `records` |
-| Open backlog | Status NOT IN your closed statuses, **no date filter** | `backlog_records` |
+| Open | Status NOT IN your closed statuses, **no date filter** | `open_records` |
+| New | created within the day | `new_records` |
+| Closed | closed within the day | `closed_records` |
 
 Script A merges them and removes the overlap, keeping the copy with the later
-Last Updated, so a record appearing in both is counted once.
+Last Updated. A record found by two searches keeps both memberships, which is
+normal: a case opened today and still open is both new and open.
+
+**Open means the standing backlog, not "opened today".** The open search must
+have no date filter. Filtered to the current day it returns only today's open
+records, which is a different and much smaller number. If you want "opened today
+and still open" as well, that is `new_inc_total` minus the same-day closes, not
+`open_inc_total`.
+
+### The search and the spec are cross-checked
+
+Where a base has its own search, that search is the authority, since it is what
+the CIM app itself considers open, new or closed. Script A still evaluates the
+date conditions and reports any gap in `coverage.scope.base_disagreement`.
+
+A gap is worth investigating. It usually means a search filter and the metric
+definition have drifted apart, for example a closed search returning records
+closed before today, or an open search that carries a date filter it should not.
+Set `base_assignment` to `condition` to make the date conditions authoritative
+instead.
 
 ### If you only wire one search
 
@@ -126,8 +148,11 @@ Script A carries all the configuration. B and C only need A's outputs.
 
 | Input | Purpose |
 | --- | --- |
-| `records` | output of the day-activity Search Records action |
-| `backlog_records` | output of the open-backlog search, no date filter |
+| `open_records` | the open search, no date filter (alias `backlog_records`) |
+| `new_records` | the created-today search |
+| `closed_records` | the closed-today search |
+| `records` | a single mixed search, if not using per-base searches |
+| `base_assignment` | `auto` (trust each search), `search`, or `condition` |
 | `data_scope` | `auto`, `full`, `day_plus_backlog`, `day_updated`, `day_created` |
 | `period_mode` | `today`, `full_today`, `yesterday` or `date` |
 | `snapshot_date` | the day to run, when re-running a past day |
@@ -141,9 +166,9 @@ Script A carries all the configuration. B and C only need A's outputs.
 | `record_hierarchy_filter` | keep only parent rows, or only child rows |
 | `suspect_minutes_over` | duration above which a value is treated as bad data |
 
-Only `records` is required, but without `backlog_records` the open-base metrics
-are suppressed. Everything else has a default, listed at the top of the helper
-block in each script.
+Pass whichever searches you have. Without an open search, and without declaring
+`data_scope: full`, the open-base metrics are suppressed rather than guessed.
+Everything else has a default, listed at the top of the helper block.
 
 ---
 

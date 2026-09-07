@@ -5,10 +5,22 @@ action's output, so this is the only script that knows your CIM column names.
 
 Inputs
 ------
-records                  raw CIM records from the day's Search Records action
-backlog_records          optional second search: every record still open, with
-                         no date filter. Required for the open-base metrics,
-                         because a one-day slice cannot measure a backlog
+One search per base is the clearest wiring, and each maps to an input:
+
+    open_records     Status NOT IN closed statuses, NO date filter
+    new_records      created within the day
+    closed_records   closed within the day
+
+Pass whichever you have. A base with its own search is taken from that search;
+a base without one is derived from the date conditions applied to whatever
+records did arrive, and is suppressed downstream if the fetch cannot support it.
+
+records                  a single mixed search, when not using per-base searches
+open_records             the open-backlog search (alias: backlog_records)
+new_records              the new-today search
+closed_records           the closed-today search
+base_assignment          auto | search | condition  (default auto: trust a
+                         search where one was given, else the date conditions)
 data_scope               auto | full | day_created | day_updated |
                          day_plus_backlog  (default auto). Auto never assumes
                          "full"; declare it when the search has no date filter
@@ -28,7 +40,9 @@ suspect_minutes_over     durations above this are treated as bad data
 
 Outputs
 -------
-records   canonical records carrying in_open / in_new / in_closed
+records   canonical records carrying in_open / in_new / in_closed, plus the
+          cond_* flags the date conditions produced and the searches each
+          record arrived from
 period    start, end, date, key - the day this snapshot is for
 coverage  which canonical fields resolved, what was skipped, suspect durations,
           and which metric bases the fetched data can actually measure
@@ -577,7 +591,11 @@ def resolve_scope(declared, has_backlog, records, start):
 
 
 def dedupe(records):
-    """One row per record when the two searches overlap; newest update wins."""
+    """One row per record when the searches overlap; newest update wins.
+
+    A record found by more than one search keeps every search it came from, so
+    base membership survives the merge.
+    """
     best = {}
     for record in records:
         key = record.get("tracking_id") or record.get("alert_uid")
@@ -585,11 +603,46 @@ def dedupe(records):
         if current is None:
             best[key] = record
             continue
+        sources = current["_sources"] | record["_sources"]
         a = parse_datetime(record.get("updated_at"))
         b = parse_datetime(current.get("updated_at"))
-        if a is not None and (b is None or a > b):
-            best[key] = record
+        winner = record if (a is not None and (b is None or a > b)) else current
+        winner["_sources"] = sources
+        best[key] = winner
     return list(best.values())
+
+
+def assign_bases(records, searched_bases, mode="auto"):
+    """Decide in_open / in_new / in_closed, and cross-check the two answers.
+
+    Where a base has its own search, that search is the authority: it is what the
+    CIM app itself considers open, new or closed. The date conditions still run,
+    and any disagreement is reported rather than hidden, because a gap between
+    them usually means a search filter and the metric spec have drifted apart.
+    """
+    mode = (mode or "auto").strip().lower()
+    disagreement = {}
+    for base in ("open", "new", "closed"):
+        by_search = base in searched_bases
+        use_search = (mode == "search") or (mode == "auto" and by_search)
+        cond_key, in_key = "cond_" + base, "in_" + base
+
+        for record in records:
+            if use_search:
+                record[in_key] = base in record["_sources"]
+            else:
+                record[in_key] = record[cond_key]
+
+        if by_search:
+            from_search = sum(1 for r in records if base in r["_sources"])
+            from_cond = sum(1 for r in records if r[cond_key])
+            if from_search != from_cond:
+                disagreement[base] = {
+                    "from_search": from_search,
+                    "from_condition": from_cond,
+                    "delta": from_search - from_cond,
+                }
+    return disagreement
 
 
 def normalize(raw_records, options):
@@ -682,6 +735,7 @@ def normalize(raw_records, options):
         dwell_from = state_changed_at or updated_at or created_at
 
         normalized.append({
+            "_sources": set(),
             "tracking_id": _clean(pick_field(raw, fields["tracking_id"])) or "row-{}".format(index),
             "alert_uid": _clean(pick_field(raw, fields["alert_uid"])),
             "title": _clean(pick_field(raw, fields["title"])),
@@ -709,9 +763,11 @@ def normalize(raw_records, options):
             "is_p1p2": is_p1p2,
             "is_truly_resolved": is_resolved_state and not is_false_positive,
 
-            "in_open": in_open,
-            "in_new": in_new,
-            "in_closed": in_closed,
+            # What the date conditions say. Final membership is decided in
+            # main(), which prefers a dedicated search when one was supplied.
+            "cond_open": in_open,
+            "cond_new": in_new,
+            "cond_closed": in_closed,
 
             # Measured at the period end so a re-run of a past day describes
             # that day rather than today.
@@ -748,7 +804,8 @@ def _to_number(value):
         return None
 
 
-def build_coverage(records, skipped, suspect_durations, filtered_out, scope):
+def build_coverage(records, skipped, suspect_durations, filtered_out, scope,
+                   searched_bases=None, disagreement=None, rows_fetched=None):
     """Which canonical fields actually carried data, so Script B can be honest.
 
     A field that resolved on no record at all is reported missing, and every
@@ -767,18 +824,36 @@ def build_coverage(records, skipped, suspect_durations, filtered_out, scope):
             present.append(field)
         else:
             missing.append(field)
+    searched_bases = set(searched_bases or [])
     open_ok, closed_ok, note = SCOPE_RULES[scope]
+    # A base with its own search is measurable regardless of the day scope,
+    # because that search answered the question directly.
+    if "open" in searched_bases:
+        open_ok = True
+    if "closed" in searched_bases:
+        closed_ok = True
+    if searched_bases:
+        note = "{}; dedicated search for: {}".format(note, ", ".join(sorted(searched_bases)))
     return {
         "scope": {
             "data_scope": scope,
             "open_base_measurable": open_ok,
             "closed_base_measurable": closed_ok,
+            "searched_bases": sorted(searched_bases),
+            "base_disagreement": disagreement or {},
             "note": note,
         },
         "fields_present": present,
         "fields_missing": missing,
-        "records_in": len(records) + len(skipped) + filtered_out,
+        # rows_fetched counts every row the searches returned; the gap to
+        # records_used is the overlap between them, which is expected when a
+        # record is both open and new.
+        "rows_fetched": (len(records) + len(skipped) + filtered_out
+                         if rows_fetched is None else rows_fetched),
         "records_used": len(records),
+        "duplicates_merged": (0 if rows_fetched is None else
+                              max(rows_fetched - len(skipped) - filtered_out
+                                  - len(records), 0)),
         "records_skipped": len(skipped),
         "records_filtered_by_hierarchy": filtered_out,
         "suspect_durations_dropped": suspect_durations,
@@ -806,16 +881,42 @@ def main(context=None):
         "suspect_minutes_over": get_input(context, "suspect_minutes_over"),
     }
 
-    day_records = _as_list(get_input(context, "records", []))
-    backlog_records = _as_list(get_input(context, "backlog_records", []))
+    buckets = [
+        ("generic", _as_list(get_input(context, "records", []))),
+        ("open", _as_list(get_input(context, "open_records",
+                                    get_input(context, "backlog_records", [])))),
+        ("new", _as_list(get_input(context, "new_records", []))),
+        ("closed", _as_list(get_input(context, "closed_records", []))),
+    ]
 
-    records, skipped, suspect, filtered = normalize(
-        day_records + backlog_records, options)
+    records, skipped, suspect, filtered = [], [], 0, 0
+    rows_fetched = sum(len(rows) for _, rows in buckets)
+    for source, rows in buckets:
+        if not rows:
+            continue
+        part, part_skipped, part_suspect, part_filtered = normalize(rows, options)
+        for record in part:
+            record["_sources"].add(source)
+        records.extend(part)
+        skipped.extend(part_skipped)
+        suspect += part_suspect
+        filtered += part_filtered
+
     records = dedupe(records)
+    searched_bases = {source for source, rows in buckets
+                      if rows and source != "generic"}
+
+    disagreement = assign_bases(
+        records, searched_bases, get_input(context, "base_assignment", "auto"))
 
     scope = resolve_scope(get_input(context, "data_scope", "auto"),
-                          bool(backlog_records), records, start)
-    coverage = build_coverage(records, skipped, suspect, filtered, scope)
+                          "open" in searched_bases, records, start)
+    coverage = build_coverage(records, skipped, suspect, filtered, scope,
+                              searched_bases, disagreement, rows_fetched)
+
+    # sets are not JSON-safe, and the playbook has to carry this payload
+    for record in records:
+        record["_sources"] = sorted(record["_sources"])
 
     return {
         "records": records,
