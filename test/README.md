@@ -197,6 +197,24 @@ To backfill or correct a day, set `period_mode: date` and `snapshot_date`.
 
 ---
 
+## Field names
+
+Names are matched on letters and digits only, case-insensitively, so
+`First Created`, `firstCreated` and `first-created` all resolve to the same
+canonical field. A change in naming convention cannot silently empty the
+metrics.
+
+The keys the CIM search returns are mapped out of the box, including
+`tracking-id`, `first-created`, `last-updated`, `manual-verdict`,
+`current-owner`, and the measured durations `signal-mtta-minutes`,
+`signal-mtti-minutes` and `signal-mttr-minutes`.
+
+If a field is still not found, `coverage.records_skipped` counts the records
+that had no usable created date and `skipped_detail` says why. Add the real key
+through the `field_map` input rather than editing the script.
+
+---
+
 ## Inputs
 
 `records` is the only required input. The rest have defaults, listed at the top

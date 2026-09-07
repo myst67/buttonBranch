@@ -58,36 +58,42 @@ UTC = timezone.utc
 
 DEFAULT_FIELD_MAP = {
     "id": ["id", "recordId", "Tracking Id", "trackingId"],
-    "tracking_id": ["Tracking Id", "trackingId", "trackingFull"],
-    "alert_uid": ["Alert UID", "alertUid", "alert_uid"],
+    "tracking_id": ["Tracking Id", "tracking-id", "trackingId", "trackingFull"],
+    "alert_uid": ["Alert UID", "alert-uid", "alertUid", "alert_uid"],
     "title": ["Title", "title", "name"],
-    "assigned_to": ["Current Owner", "currentOwner", "assignedTo", "assignee"],
+    "assigned_to": ["Current Owner", "current-owner", "currentOwner", "assignedTo", "assignee"],
     "severity": ["Severity", "severity", "priority", "Priority"],
     "status": ["Status", "status", "state", "currentState"],
     "type": ["Type", "type", "recordType"],
-    "record_hierarchy": ["Record-hierarchy", "recordHierarchy", "record_hierarchy"],
+    "record_hierarchy": ["Record-hierarchy", "record-hierarchy", "recordHierarchy"],
     "classification": ["Classification", "classification"],
-    "manual_verdict": ["Manual Verdict", "manualVerdict", "manual_verdict"],
-    "alert_categories": ["Alert Categories", "alertCategories"],
-    "escalated": ["Escalated?", "Escalated", "escalated"],
+    "manual_verdict": ["Manual Verdict", "manual-verdict", "manualVerdict"],
+    "alert_categories": ["Alert Categories", "alert-categories", "alertCategories"],
+    "escalated": ["Escalated?", "escalated", "Escalated"],
     "escalate_to": ["Escalate to?", "Escalate to", "escalateTo"],
-    "threat_type": ["Threat Type", "threatType"],
-    "mitre_technique": ["MITRE ATT&CK Technique", "mitreTechnique", "MITRE ATT&CK Techniques"],
+    "threat_type": ["Threat Type", "threat-type", "threatType"],
+    "mitre_technique": ["MITRE ATT&CK Technique", "mitre-attack-technique",
+                        "mitreTechnique"],
     "mitre_technique_count": ["MITRE ATT&CK Technique Count", "mitreTechniqueCount"],
 
-    "created_at": ["First Created", "firstCreated", "created", "createdDate"],
-    "updated_at": ["Last Updated", "lastUpdated", "modified", "updated"],
-    "closed_at": ["Time Resolved", "timeResolved", "closed", "closedDate"],
-    "remediated_at": ["Time of Remediation", "timeOfRemediation", "remediatedAt"],
+    "created_at": ["First Created", "first-created", "firstCreated", "created", "createdDate"],
+    "updated_at": ["Last Updated", "last-updated", "lastUpdated", "modified", "updated"],
+    "closed_at": ["Time Resolved", "time-resolved", "timeResolved", "closed-date",
+                  "closed", "closedDate", "resolved-date"],
+    "remediated_at": ["Time of Remediation", "time-of-remediation", "timeOfRemediation"],
 
     # Durations: the text column carries sub-minute precision, the numeric one
     # is truncated, so the text is preferred when both are present.
     "tta_text": ["Time to Acknowledge", "timeToAcknowledge"],
-    "tta_minutes": ["Time to Acknowledge Minutes", "timeToAcknowledgeMinutes"],
+    # The signal-* columns carry the measured durations directly, in minutes.
+    "tta_minutes": ["signal-mtta-minutes", "Time to Acknowledge Minutes",
+                    "timeToAcknowledgeMinutes"],
     "analyze_text": ["Time to Analyze (excluding pending)", "Time to Analyze", "timeToAnalyze"],
-    "analyze_minutes": ["Time to Analyze Minutes", "timeToAnalyzeMinutes"],
+    "analyze_minutes": ["signal-mtti-minutes", "Time to Analyze Minutes",
+                        "timeToAnalyzeMinutes"],
     "remediate_text": ["Time to Remediate", "timeToRemediate"],
-    "remediate_minutes": ["Time to Remediate Minutes", "timeToRemediateMinutes"],
+    "remediate_minutes": ["signal-mttr-minutes", "Time to Remediate Minutes",
+                          "timeToRemediateMinutes"],
 
     # Not present in the CIM table today. Map them here if you ever add them
     # and the metrics that need them start reporting instead of going null.
@@ -198,18 +204,34 @@ def _flatten(record, prefix="", out=None):
     return out
 
 
+def normalize_key(name):
+    """Reduce a field name to letters and digits, lowercased.
+
+    CIM records can arrive keyed by display name, camelCase, snake_case or
+    kebab-case depending on how the search returns them. Comparing on the
+    reduced form means "First Created", "firstCreated" and "first-created" all
+    match the same candidate, so a naming convention change cannot silently
+    empty out the metrics.
+    """
+    return "".join(ch for ch in str(name).lower() if ch.isalnum())
+
+
 def pick_field(record, candidates, default=None):
-    """First non-empty value among ``candidates`` (case-insensitive keys)."""
+    """First non-empty value among ``candidates``, matching names loosely."""
     if not isinstance(record, dict):
         return default
     flat = _flatten(record)
-    lowered = {k.lower(): v for k, v in flat.items()}
+
+    reduced = {}
+    for key, value in flat.items():
+        reduced.setdefault(normalize_key(key), value)
+
     for candidate in candidates or []:
-        for key in (candidate, str(candidate).lower()):
-            if key in flat and flat[key] not in (None, ""):
-                return flat[key]
-            if key in lowered and lowered[key] not in (None, ""):
-                return lowered[key]
+        if candidate in flat and flat[candidate] not in (None, ""):
+            return flat[candidate]
+        found = reduced.get(normalize_key(candidate))
+        if found not in (None, ""):
+            return found
     return default
 
 
