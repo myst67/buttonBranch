@@ -1,25 +1,38 @@
-"""Script B of 3 - compute the KPI metric catalog for one day.
+"""Script C - CLOSED incident metrics.
 
-Reads Script A's output and produces every metric in the catalog. Metrics whose
-source field does not exist on the CIM record are stored as null with a stated
-reason, never as 0, so a missing field can never read as a good score.
+Feed this the records array from the Search Records action that finds records
+closed in the day being recorded:
+
+    closed within the day
+
+Filter that search on the closed or last-updated date, not on created date. A
+created-date filter misses every record raised earlier and closed today, which
+is most of them.
+
+Every output is a plain value, ready to map straight into an application field.
 
 Inputs
 ------
-records   Script A's records
-period    Script A's period
-coverage  Script A's coverage
-top_n     rows to keep in each breakdown table (default 10)
-previous_open_backlog   yesterday's Open Inc Total, from the previous KPI
-                        record. Omit on the first run to seed the series
-previous_snapshot_date  yesterday's Snapshot Date, used to prove the series
-                        has no gap
+records        the closed-today search results
+period_mode    today | full_today | yesterday | date  (default full_today)
+snapshot_date  the day being recorded
+now            optional run time, for reproducible re-runs
+field_map, closed_statuses, resolved_statuses, false_positive_values,
+false_positive_fields, p1p2_values, record_hierarchy_filter,
+suspect_minutes_over   see the helper block for the defaults
 
 Outputs
 -------
-metrics   the catalog, plus a continuity block reconciling the measured
-          backlog against the day-on-day carry-forward
-coverage  Script A's coverage plus a per-metric availability roll-up
+closed_inc_total, closed_inc_not_resolved, closed_inc_same_day_open,
+closed_inc_on_first_attempt, false_positive_count,
+false_positive_high_risk_count, true_positive_count,
+duration_closed_inc_{avg,sum,p90,count},
+duration_false_positive_closed_inc_{...}, mttr_hours_{...},
+risk_score_closed_inc_{...}, risk_score_false_positive_inc_{...},
+risk_score_high_risk_fp_inc_{...},
+fp_rate, same_day_close_rate, first_close_rate, true_positive_rate
+
+snapshot_date, coverage, breakdowns, metrics
 """
 
 from __future__ import annotations
@@ -476,336 +489,354 @@ def resolve_day_window(period_mode, snapshot_date=None, now=None):
         return midnight, midnight + day_end, midnight.date().isoformat()
     return midnight, run_at, midnight.date().isoformat()
 
+
+def normalize_records(raw_records, options, end):
+    """Map raw CIM records onto canonical names and derive the per-record values.
+
+    ``end`` is the period end: ages and dwell times are measured against it, so a
+    re-run of a past day describes that day rather than today.
+
+    Returns (records, skipped, suspect_durations, filtered_out).
+    """
+    fields = merge_field_map(options.get("field_map"))
+    closed_statuses = options.get("closed_statuses") or DEFAULT_CLOSED_STATUSES
+    resolved_statuses = options.get("resolved_statuses") or DEFAULT_RESOLVED_STATUSES
+    fp_values = options.get("false_positive_values") or DEFAULT_FALSE_POSITIVE_VALUES
+    fp_fields = options.get("false_positive_fields") or DEFAULT_FALSE_POSITIVE_FIELDS
+    p1p2_values = options.get("p1p2_values") or DEFAULT_P1P2_VALUES
+    hierarchy_filter = clean_text(options.get("record_hierarchy_filter"))
+    cap = float(options.get("suspect_minutes_over") or DEFAULT_SUSPECT_MINUTES_OVER)
+
+    records, skipped = [], []
+    suspect_durations = 0
+    filtered_out = 0
+
+    for index, raw in enumerate(as_list(raw_records)):
+        if not isinstance(raw, dict):
+            skipped.append({"index": index, "reason": "record is not an object"})
+            continue
+
+        hierarchy = clean_text(pick_field(raw, fields["record_hierarchy"]))
+        if hierarchy_filter and not in_set(hierarchy, [hierarchy_filter]):
+            filtered_out += 1
+            continue
+
+        created_at = parse_datetime(pick_field(raw, fields["created_at"]))
+        if created_at is None:
+            skipped.append({
+                "index": index,
+                "id": clean_text(pick_field(raw, fields["tracking_id"])),
+                "reason": "missing or unparsable created date",
+            })
+            continue
+
+        status = clean_text(pick_field(raw, fields["status"]))
+        classification = clean_text(pick_field(raw, fields["classification"]))
+        manual_verdict = clean_text(pick_field(raw, fields["manual_verdict"]))
+        updated_at = parse_datetime(pick_field(raw, fields["updated_at"]))
+        closed_at = parse_datetime(pick_field(raw, fields["closed_at"]))
+        remediated_at = parse_datetime(pick_field(raw, fields["remediated_at"]))
+        state_changed_at = parse_datetime(pick_field(raw, fields["state_changed_at"]))
+
+        verdicts = {"status": status, "classification": classification,
+                    "manual_verdict": manual_verdict}
+        is_false_positive = any(in_set(verdicts.get(name), fp_values)
+                                for name in fp_fields)
+        is_closed_state = in_set(status, closed_statuses)
+        is_resolved_state = in_set(status, resolved_statuses)
+        severity = clean_text(pick_field(raw, fields["severity"]))
+
+        # The spec's COALESCE(closed_at, updated_at); a remediation time sits
+        # between them because it is a closure time when one was recorded.
+        effective_closed_at = closed_at or remediated_at or updated_at
+
+        tta, tta_bad = duration_minutes(raw, fields, "tta_text", "tta_minutes", cap)
+        analyze, analyze_bad = duration_minutes(
+            raw, fields, "analyze_text", "analyze_minutes", cap)
+        remediate, remediate_bad = duration_minutes(
+            raw, fields, "remediate_text", "remediate_minutes", cap)
+        suspect_durations += sum([tta_bad, analyze_bad, remediate_bad])
+
+        # A zero duration with no matching timestamp is a default, not a
+        # measurement, so it must not pull an average down to zero.
+        if remediate == 0 and remediated_at is None:
+            remediate = None
+
+        dwell_from = state_changed_at or updated_at or created_at
+
+        records.append({
+            "tracking_id": clean_text(pick_field(raw, fields["tracking_id"])) or "row-{}".format(index),
+            "alert_uid": clean_text(pick_field(raw, fields["alert_uid"])),
+            "title": clean_text(pick_field(raw, fields["title"])),
+            "assigned_to": clean_text(pick_field(raw, fields["assigned_to"])),
+            "severity": severity,
+            "status": status,
+            "type": clean_text(pick_field(raw, fields["type"])),
+            "record_hierarchy": hierarchy,
+            "classification": classification,
+            "manual_verdict": manual_verdict,
+            "threat_type": clean_text(pick_field(raw, fields["threat_type"])),
+            "mitre_technique": clean_text(pick_field(raw, fields["mitre_technique"])),
+            "escalated": is_truthy(pick_field(raw, fields["escalated"])),
+
+            "created_at": to_iso(created_at),
+            "updated_at": to_iso(updated_at),
+            "closed_at": to_iso(closed_at),
+            "effective_closed_at": to_iso(effective_closed_at),
+
+            "is_closed_state": is_closed_state,
+            "is_resolved_state": is_resolved_state,
+            "is_false_positive": is_false_positive,
+            "is_p1p2": in_set(severity, p1p2_values),
+            "is_truly_resolved": is_resolved_state and not is_false_positive,
+
+            "age_days": round((end - created_at).total_seconds() / 86400.0, 4),
+            "days_since_update": (None if updated_at is None else
+                                  round((end - updated_at).total_seconds() / 86400.0, 4)),
+            "duration_hours": (None if effective_closed_at is None else
+                               round((effective_closed_at - created_at).total_seconds() / 3600.0, 4)),
+            "dwell_hours": round((end - dwell_from).total_seconds() / 3600.0, 4),
+            "same_day_close": (effective_closed_at is not None
+                               and effective_closed_at.date() == created_at.date()),
+
+            "tta_minutes": tta,
+            "analyze_minutes": analyze,
+            "remediate_minutes": remediate,
+
+            # Reserved: these stay None until the CIM record carries them, and
+            # the metrics that need them report as unavailable rather than 0.
+            "reassign_count": to_number(pick_field(raw, fields["reassign_count"])),
+            "risk_score": to_number(pick_field(raw, fields["risk_score"])),
+            "sla_breached": (None if pick_field(raw, fields["sla_breached"]) is None
+                             else is_truthy(pick_field(raw, fields["sla_breached"]))),
+        })
+
+    return records, skipped, suspect_durations, filtered_out
+
+
+def as_list(value):
+    """Turbine sometimes hands a JSON string where a list is expected."""
+    if value is None:
+        return []
+    if isinstance(value, list):
+        return value
+    if isinstance(value, dict):
+        for key in ("records", "results", "items", "data", "value"):
+            if isinstance(value.get(key), list):
+                return value[key]
+        return [value]
+    if isinstance(value, str):
+        text = value.strip()
+        if not text:
+            return []
+        try:
+            return as_list(json.loads(text))
+        except (TypeError, ValueError):
+            return []
+    return []
+
+
+def clean_text(value):
+    if value is None:
+        return None
+    text = str(value).strip()
+    return text or None
+
+
+def to_number(value):
+    if value in (None, ""):
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def duration_minutes(record, fields, text_key, minutes_key, cap):
+    """Minutes from the text column first, the numeric column second.
+
+    Returns (minutes, was_suspect). A value beyond the cap is dropped rather than
+    allowed into an average, because the numeric columns do not all agree on
+    their unit.
+    """
+    minutes = parse_duration_minutes(
+        pick_field(record, fields[text_key]),
+        pick_field(record, fields[minutes_key]),
+    )
+    if minutes is None:
+        return None, False
+    if minutes > cap or minutes < 0:
+        return None, True
+    return minutes, False
+
+
+def read_options(context):
+    """The configuration inputs every one of the three scripts shares."""
+    return {
+        "field_map": get_input(context, "field_map"),
+        "closed_statuses": get_input(context, "closed_statuses"),
+        "resolved_statuses": get_input(context, "resolved_statuses"),
+        "false_positive_values": get_input(context, "false_positive_values"),
+        "false_positive_fields": get_input(context, "false_positive_fields"),
+        "p1p2_values": get_input(context, "p1p2_values"),
+        "record_hierarchy_filter": get_input(context, "record_hierarchy_filter"),
+        "suspect_minutes_over": get_input(context, "suspect_minutes_over"),
+    }
+
+
+def field_coverage(records, needed):
+    """Which reserved fields carried data, so a metric can say why it is null."""
+    return {name: any(r.get(name) not in (None, "") for r in records)
+            for name in needed}
+
+
+def blocked(reason):
+    """A metric that cannot be computed: null plus the reason, never 0."""
+    return {"value": None, "status": "unavailable", "reason": reason}
+
+
+def ok(value, note=None):
+    return {"value": value, "status": "proxy" if note else "ok", "reason": note}
+
+
+def flatten_metrics(metrics, prefix=""):
+    """Flatten the catalog into the scalars an application field can hold.
+
+    A value metric expands to Avg/Sum/P90/Count. A metric that is unavailable
+    still writes every one of its columns as null, so the application's field
+    set does not change shape on the day a source field is added.
+    """
+    flat = {}
+    for key in sorted(metrics):
+        entry = metrics[key]
+        value = entry.get("value")
+        if entry.get("kind", "").startswith("value"):
+            parts = value if isinstance(value, dict) else {}
+            for part in ("avg", "sum", "p90", "count"):
+                flat["{}{}_{}".format(prefix, key, part)] = parts.get(part)
+        else:
+            flat[prefix + key] = value
+    return flat
+
 # ==========================================================================
 # end shared helper block
 # ==========================================================================
 
 
-#: metric -> the canonical field it needs. Absent field means null + reason.
-REQUIRED_FIELD = {
-    "reassign_count_open_inc": "reassign_count",
-    "closed_inc_on_first_attempt": "reassign_count",
-    "first_close_rate": "reassign_count",
-    "risk_score_closed_inc": "risk_score",
-    "risk_score_false_positive_inc": "risk_score",
-    "risk_score_high_risk_fp_inc": "risk_score",
-    "sla_breached_count": "sla_breached",
-    "sla_breach_rate": "sla_breached",
-    "sla_compliance_rate": "sla_breached",
-}
+def compute_closed_metrics(records):
+    """The sixteen closed-base metrics."""
+    have = field_coverage(records, ["reassign_count", "risk_score"])
 
-#: Metrics the spec derives from an assignment history feed, which Turbine does
-#: not have here. They stay unavailable until that feed exists.
-NEEDS_HISTORY = {
-    "reassigned_open_count": "assignment history (assigned events)",
-    "reassign_count_hist_open": "assignment history (assigned events)",
-}
+    false_positives = [r for r in records if r.get("is_false_positive")]
+    high_risk_fp = [r for r in false_positives if r.get("is_p1p2")]
+    resolved = [r for r in records if r.get("is_truly_resolved")]
+    same_day = [r for r in records if r.get("same_day_close")]
 
-#: Metrics computed from a stand-in rather than the specified source.
-PROXY_NOTE = {
-    "state_dwell_hours":
-        "hours since last update; exact only when the last update was the "
-        "state change. A state-changed timestamp would make this exact.",
-    "mtta_hours":
-        "from the Time to Acknowledge column rather than the first history "
-        "event, which is the same measurement recorded directly.",
-}
+    metrics = {
+        "closed_inc_total": dict(ok(len(records)), kind="count"),
+        "closed_inc_not_resolved": dict(
+            ok(sum(1 for r in records if not r.get("is_resolved_state"))),
+            kind="count"),
+        "closed_inc_same_day_open": dict(ok(len(same_day)), kind="count"),
+        "false_positive_count": dict(ok(len(false_positives)), kind="count"),
+        "false_positive_high_risk_count": dict(ok(len(high_risk_fp)), kind="count"),
+        "true_positive_count": dict(ok(len(resolved)), kind="count"),
 
+        "duration_closed_inc": dict(
+            ok(stats([r.get("duration_hours") for r in records])),
+            kind="value_hours"),
+        "duration_false_positive_closed_inc": dict(
+            ok(stats([r.get("duration_hours") for r in false_positives])),
+            kind="value_hours"),
+        # MTTR counts only the genuinely resolved, so a wave of false positives
+        # closed in minutes cannot flatter it.
+        "mttr_hours": dict(
+            ok(stats([r.get("duration_hours") for r in resolved])),
+            kind="value_hours"),
 
-class Catalog(object):
-    """Collects metrics with their kind and availability in one place."""
-
-    def __init__(self, available_fields, unmeasurable_bases=None):
-        self.available = set(available_fields or [])
-        # A base the fetched data cannot support, e.g. the open backlog when the
-        # search only returned one day. Its metrics are nulled rather than
-        # computed from data that cannot answer them.
-        self.unmeasurable_bases = unmeasurable_bases or {}
-        self.metrics = {}
-
-    def _blocked_reason(self, key, base):
-        if base in self.unmeasurable_bases:
-            return self.unmeasurable_bases[base]
-        if key in NEEDS_HISTORY:
-            return "needs {}".format(NEEDS_HISTORY[key])
-        needed = REQUIRED_FIELD.get(key)
-        if needed and needed not in self.available:
-            return "needs the '{}' field on the CIM record".format(needed)
-        return None
-
-    def add(self, key, base, kind, compute):
-        """Store one metric, or null it out when its source field is missing."""
-        reason = self._blocked_reason(key, base)
-        if reason:
-            self.metrics[key] = {"value": None, "base": base, "kind": kind,
-                                 "status": "unavailable", "reason": reason}
-            return
-        self.metrics[key] = {
-            "value": compute(),
-            "base": base,
-            "kind": kind,
-            "status": "proxy" if key in PROXY_NOTE else "ok",
-            "reason": PROXY_NOTE.get(key),
-        }
-
-    def roll_up(self):
-        computed = [k for k, m in self.metrics.items() if m["status"] == "ok"]
-        proxied = [k for k, m in self.metrics.items() if m["status"] == "proxy"]
-        blocked = {k: m["reason"] for k, m in self.metrics.items()
-                   if m["status"] == "unavailable"}
-        return {
-            "metrics_total": len(self.metrics),
-            "metrics_computed": len(computed),
-            "metrics_proxied": len(proxied),
-            "metrics_unavailable": len(blocked),
-            "proxied": {k: PROXY_NOTE[k] for k in proxied},
-            "unavailable": blocked,
-        }
-
-
-def _unmeasurable_bases(coverage):
-    """Bases the fetched data cannot support, from Script A's scope report."""
-    scope = (coverage or {}).get("scope") or {}
-    if not scope:
-        return {}
-    blocked = {}
-    if scope.get("open_base_measurable") is False:
-        blocked["open"] = ("the search did not return the standing backlog: {}. "
-                           "Add a second Search Records action with no date "
-                           "filter for records still open, and pass it to "
-                           "Script A as backlog_records."
-                           .format(scope.get("note", "one-day slice")))
-    if scope.get("closed_base_measurable") is False:
-        blocked["closed"] = ("the search cannot see every record closed in the "
-                             "window: {}. Filter the day search on last-updated "
-                             "rather than created date."
-                             .format(scope.get("note", "one-day slice")))
-    return blocked
-
-
-def build_continuity(catalog, snapshot_date, previous_open, previous_date):
-    """Reconcile the measured backlog with yesterday's, and report any drift.
-
-    The backlog recurrence is:
-
-        open_today = open_yesterday + new_today - closed_today
-
-    Closures have to be subtracted. Carrying yesterday's backlog forward and
-    only adding today's new records makes the number rise every day and never
-    fall, so it stops describing the backlog within a week.
-
-    The carry-forward is a check, not the source of truth: the open search
-    measures the backlog directly every day. A non-zero drift means the two
-    disagree, which usually points at records closed retroactively, a changed
-    status, or a search that missed rows - all worth seeing rather than hiding.
-    """
-    def value_of(key):
-        entry = catalog.get(key) or {}
-        return entry.get("value")
-
-    measured = value_of("open_inc_total")
-    new_count = value_of("new_inc_total")
-    closed_count = value_of("closed_inc_total")
-
-    previous_open = None if previous_open in (None, "") else float(previous_open)
-    today = parse_datetime(snapshot_date)
-    yesterday = parse_datetime(previous_date)
-    gap_days = None
-    if today is not None and yesterday is not None:
-        gap_days = (today.date() - yesterday.date()).days
-
-    if previous_open is None:
-        return {
-            "is_seed_day": True,
-            "previous_open_backlog": None,
-            "previous_snapshot_date": previous_date,
-            "days_since_previous": gap_days,
-            "expected_open_backlog": None,
-            "measured_open_backlog": measured,
-            "drift": None,
-            "continuous": True,
-            "note": ("first run: the measured backlog seeds the series, and "
-                     "every later day is checked against it"),
-        }
-
-    if gap_days is not None and gap_days != 1:
-        return {
-            "is_seed_day": False,
-            "previous_open_backlog": previous_open,
-            "previous_snapshot_date": previous_date,
-            "days_since_previous": gap_days,
-            "expected_open_backlog": None,
-            "measured_open_backlog": measured,
-            "drift": None,
-            "continuous": False,
-            "note": ("the previous record is {} days back, so the carry-forward "
-                     "cannot be checked: the days in between were never "
-                     "recorded. Backfill them with period_mode 'date'."
-                     .format(gap_days)),
-        }
-
-    expected = None
-    drift = None
-    if None not in (new_count, closed_count):
-        expected = previous_open + new_count - closed_count
-        if measured is not None:
-            drift = round(measured - expected, 2)
-
-    return {
-        "is_seed_day": False,
-        "previous_open_backlog": previous_open,
-        "previous_snapshot_date": previous_date,
-        "days_since_previous": gap_days,
-        "expected_open_backlog": expected,
-        "measured_open_backlog": measured,
-        "drift": drift,
-        "continuous": True,
-        "note": ("expected = previous {} + new {} - closed {}"
-                 .format(previous_open, new_count, closed_count)
-                 if expected is not None else
-                 "carry-forward needs the new and closed counts, which this "
-                 "run could not measure"),
+        "fp_rate": dict(ok(pct(len(false_positives), len(records))), kind="rate"),
+        "same_day_close_rate": dict(ok(pct(len(same_day), len(records))), kind="rate"),
+        "true_positive_rate": dict(ok(pct(len(resolved), len(records))), kind="rate"),
     }
 
+    if have["reassign_count"]:
+        first_attempt = [r for r in records if r.get("reassign_count") == 0]
+        metrics["closed_inc_on_first_attempt"] = dict(
+            ok(len(first_attempt)), kind="count")
+        metrics["first_close_rate"] = dict(
+            ok(pct(len(first_attempt), len(records))), kind="rate")
+    else:
+        why = "needs a reassign count field on the CIM record"
+        metrics["closed_inc_on_first_attempt"] = dict(blocked(why), kind="count")
+        metrics["first_close_rate"] = dict(blocked(why), kind="rate")
 
-def compute_catalog(records, coverage=None, top_n=10):
-    records = records or []
-    available = set((coverage or {}).get("fields_present") or [])
-
-    open_base = [r for r in records if r.get("in_open")]
-    new_base = [r for r in records if r.get("in_new")]
-    closed_base = [r for r in records if r.get("in_closed")]
-
-    fp_closed = [r for r in closed_base if r.get("is_false_positive")]
-    resolved_closed = [r for r in closed_base if r.get("is_truly_resolved")]
-
-    cat = Catalog(available, _unmeasurable_bases(coverage))
-
-    # ---- open base ------------------------------------------------------
-    cat.add("open_inc_total", "open", "count", lambda: len(open_base))
-    cat.add("open_more_than_five_days", "open", "count",
-            lambda: sum(1 for r in open_base if (r.get("age_days") or 0) > 5))
-    cat.add("open_more_than_thirty_days", "open", "count",
-            lambda: sum(1 for r in open_base if (r.get("age_days") or 0) > 30))
-    cat.add("stale_open_no_update_5d", "open", "count",
-            lambda: sum(1 for r in open_base
-                        if (r.get("days_since_update") or 0) > 5))
-    cat.add("distinct_agents", "open", "count",
-            lambda: len({r["assigned_to"] for r in open_base if r.get("assigned_to")}))
-    cat.add("oldest_open_age", "open", "days",
-            lambda: (round(max(r.get("age_days") or 0 for r in open_base), 2)
-                     if open_base else None))
-    cat.add("age_open_inc", "open", "value_days",
-            lambda: stats([r.get("age_days") for r in open_base]))
-    cat.add("age_last_update_open_inc", "open", "value_days",
-            lambda: stats([r.get("days_since_update") for r in open_base]))
-    cat.add("state_dwell_hours", "open", "value_hours",
-            lambda: stats([r.get("dwell_hours") for r in open_base]))
-    cat.add("reassign_count_open_inc", "open", "value",
-            lambda: stats([r.get("reassign_count") for r in open_base]))
-    cat.add("reassigned_open_count", "open", "count", lambda: None)
-    cat.add("reassign_count_hist_open", "open", "value", lambda: None)
-
-    # ---- new base -------------------------------------------------------
-    cat.add("new_inc_total", "new", "count", lambda: len(new_base))
-    cat.add("new_inc_p1p2_count", "new", "count",
-            lambda: sum(1 for r in new_base if r.get("is_p1p2")))
-    cat.add("mtta_hours", "new", "value_hours",
-            lambda: stats([r["tta_minutes"] / 60.0 for r in new_base
-                           if r.get("tta_minutes") is not None]))
-    cat.add("sla_breached_count", "new", "count",
-            lambda: sum(1 for r in new_base if r.get("sla_breached")))
-    cat.add("sla_breach_rate", "new", "rate",
-            lambda: pct(sum(1 for r in new_base if r.get("sla_breached")), len(new_base)))
-    cat.add("sla_compliance_rate", "new", "rate",
-            lambda: pct(sum(1 for r in new_base if r.get("sla_breached") is False),
-                        len(new_base)))
-
-    # ---- closed base ----------------------------------------------------
-    cat.add("closed_inc_total", "closed", "count", lambda: len(closed_base))
-    cat.add("closed_inc_not_resolved", "closed", "count",
-            lambda: sum(1 for r in closed_base if not r.get("is_resolved_state")))
-    cat.add("closed_inc_same_day_open", "closed", "count",
-            lambda: sum(1 for r in closed_base if r.get("same_day_close")))
-    cat.add("false_positive_count", "closed", "count", lambda: len(fp_closed))
-    cat.add("false_positive_high_risk_count", "closed", "count",
-            lambda: sum(1 for r in fp_closed if r.get("is_p1p2")))
-    cat.add("true_positive_count", "closed", "count", lambda: len(resolved_closed))
-    cat.add("duration_closed_inc", "closed", "value_hours",
-            lambda: stats([r.get("duration_hours") for r in closed_base]))
-    cat.add("duration_false_positive_closed_inc", "closed", "value_hours",
-            lambda: stats([r.get("duration_hours") for r in fp_closed]))
-    cat.add("mttr_hours", "closed", "value_hours",
-            lambda: stats([r.get("duration_hours") for r in resolved_closed]))
-    cat.add("fp_rate", "closed", "rate",
-            lambda: pct(len(fp_closed), len(closed_base)))
-    cat.add("same_day_close_rate", "closed", "rate",
-            lambda: pct(sum(1 for r in closed_base if r.get("same_day_close")),
-                        len(closed_base)))
-    cat.add("closed_inc_on_first_attempt", "closed", "count",
-            lambda: sum(1 for r in closed_base if r.get("reassign_count") == 0))
-    cat.add("first_close_rate", "closed", "rate",
-            lambda: pct(sum(1 for r in closed_base if r.get("reassign_count") == 0),
-                        len(closed_base)))
-    cat.add("risk_score_closed_inc", "closed", "value",
-            lambda: stats([r.get("risk_score") for r in closed_base]))
-    cat.add("risk_score_false_positive_inc", "closed", "value",
-            lambda: stats([r.get("risk_score") for r in fp_closed]))
-    cat.add("risk_score_high_risk_fp_inc", "closed", "value",
-            lambda: stats([r.get("risk_score") for r in fp_closed if r.get("is_p1p2")]))
-
-    breakdowns = {
-        "open_by_severity": count_by(open_base, "severity", order=PRIORITY_ORDER),
-        "open_by_status": count_by(open_base, "status"),
-        "open_by_owner": count_by(open_base, "assigned_to", top=top_n),
-        "new_by_severity": count_by(new_base, "severity", order=PRIORITY_ORDER),
-        "new_by_threat_type": count_by(new_base, "threat_type", top=top_n),
-        "new_by_mitre_technique": count_by(new_base, "mitre_technique", top=top_n),
-        "closed_by_status": count_by(closed_base, "status", top=top_n),
-    }
-
-    oldest = sorted(open_base, key=lambda r: r.get("age_days") or 0, reverse=True)
-    return cat, {
-        "base_counts": {
-            "open": len(open_base),
-            "new": len(new_base),
-            "closed": len(closed_base),
-        },
-        "breakdowns": breakdowns,
-        "oldest_open": [
-            {"tracking_id": r.get("tracking_id"), "severity": r.get("severity"),
-             "assigned_to": r.get("assigned_to"), "status": r.get("status"),
-             "age_days": round(r.get("age_days") or 0, 2)}
-            for r in oldest[:top_n]
-        ],
-    }
+    if have["risk_score"]:
+        metrics["risk_score_closed_inc"] = dict(
+            ok(stats([r.get("risk_score") for r in records])), kind="value")
+        metrics["risk_score_false_positive_inc"] = dict(
+            ok(stats([r.get("risk_score") for r in false_positives])), kind="value")
+        metrics["risk_score_high_risk_fp_inc"] = dict(
+            ok(stats([r.get("risk_score") for r in high_risk_fp])), kind="value")
+    else:
+        why = "needs a risk score field on the CIM record"
+        for key in ("risk_score_closed_inc", "risk_score_false_positive_inc",
+                    "risk_score_high_risk_fp_inc"):
+            metrics[key] = dict(blocked(why), kind="value")
+    return metrics
 
 
 def main(context=None):
-    period = get_input(context, "period", {}) or {}
-    coverage = dict(get_input(context, "coverage", {}) or {})
-
-    cat, extras = compute_catalog(
-        get_input(context, "records", []),
-        coverage,
-        int(get_input(context, "top_n", 10)),
-    )
-    coverage["metrics"] = cat.roll_up()
-    continuity = build_continuity(
-        cat.metrics, period.get("date"),
-        get_input(context, "previous_open_backlog"),
-        get_input(context, "previous_snapshot_date"),
+    start, end, snapshot = resolve_day_window(
+        get_input(context, "period_mode", "full_today"),
+        get_input(context, "snapshot_date"),
+        get_input(context, "now"),
     )
 
-    return {
-        "metrics": {
-            "snapshot_date": period.get("date"),
-            "continuity": continuity,
-            "period": {"start": period.get("start"), "end": period.get("end")},
-            "catalog": cat.metrics,
-            "base_counts": extras["base_counts"],
-            "breakdowns": extras["breakdowns"],
-            "oldest_open": extras["oldest_open"],
+    records, skipped, suspect, filtered = normalize_records(
+        get_input(context, "records", []), read_options(context), end)
+
+    # closed = closed-state AND COALESCE(closed_at, updated_at) inside the day.
+    inside, outside, still_open = [], [], []
+    for record in records:
+        if not record.get("is_closed_state"):
+            still_open.append(record)
+            continue
+        closed_at = parse_datetime(record.get("effective_closed_at"))
+        (inside if closed_at is not None and start <= closed_at <= end
+         else outside).append(record)
+
+    metrics = compute_closed_metrics(inside)
+    result = flatten_metrics(metrics)
+    result.update({
+        "snapshot_date": snapshot,
+        "period_start": to_iso(start),
+        "period_end": to_iso(end),
+        "metrics": metrics,
+        "breakdowns": {
+            "closed_by_severity": count_by(inside, "severity", order=PRIORITY_ORDER),
+            "closed_by_status": count_by(inside, "status", top=10),
+            "closed_by_owner": count_by(inside, "assigned_to", top=10),
+            "closed_by_classification": count_by(inside, "classification", top=10),
         },
-        "coverage": coverage,
-    }
+        "coverage": {
+            "rows_fetched": len(records) + len(skipped) + filtered,
+            "records_used": len(inside),
+            "records_skipped": len(skipped),
+            "records_filtered_by_hierarchy": filtered,
+            "records_outside_window": len(outside),
+            "records_not_in_closed_status": len(still_open),
+            "suspect_durations_dropped": suspect,
+            "unavailable": {k: m["reason"] for k, m in metrics.items()
+                            if m["status"] == "unavailable"},
+            "proxied": {k: m["reason"] for k, m in metrics.items()
+                        if m["status"] == "proxy"},
+            "skipped_detail": skipped[:50],
+            "warning": ("; ".join(filter(None, [
+                ("{} record(s) closed outside {} - {}".format(
+                    len(outside), to_iso(start), to_iso(end)) if outside else None),
+                ("{} record(s) are not in a closed status".format(len(still_open))
+                 if still_open else None),
+            ])) or None),
+        },
+    })
+    return result

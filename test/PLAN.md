@@ -32,27 +32,15 @@ repository rather than exporting real records.
 ```
 [ Cron trigger: daily at 11:55 ]
         |
-[ Search Records ]  ->  open: Status NOT IN closed, no date filter
-[ Search Records ]  ->  new: created today
-[ Search Records ]  ->  closed: closed today
-        |   open_records + new_records + closed_records
-[ Python: Script A - normalize and classify ]
-        |   records, period, coverage, summary
-[ If summary.has_records is false -> stop ]
+  [ Search: Status NOT IN closed, no date filter ] -> [ Script A ] -> open metrics
+  [ Search: created today ]                        -> [ Script B ] -> new metrics
+  [ Search: closed today ]                         -> [ Script C ] -> closed metrics
         |
-[ Python: Script B - compute the metric catalog ]
-        |   metrics, coverage
-[ Search Records ]  ->  KPI app, Snapshot Date == metrics.snapshot_date
-[ Search Records ]  ->  KPI app, yesterday's record, for previous_open_backlog
-        |
-[ Python: Script C - build the storage payload ]
-        |   fields, action, record_id
-[ If action == "update" -> Update Record ] [ Else -> Create Record ]
+[ Create / Update Record ]  ->  KPI application, one record per day
 ```
 
-Three Python actions. Script A owns the field mapping, Script B owns the
-arithmetic, Script C owns the storage shape. That split means a CIM field rename
-only ever touches Script A.
+One script per base, each fed by its own search and returning plain values to
+map into application fields. The three are independent and can run in parallel.
 
 The backlog search is not optional. A one-day slice cannot measure the open
 backlog, because backlog is a stock rather than a flow. Where the fetched data

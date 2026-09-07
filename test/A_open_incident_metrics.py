@@ -1,0 +1,907 @@
+"""Script A - OPEN incident metrics.
+
+Feed this the records array from the Search Records action that finds the open
+backlog:
+
+    Status NOT IN (your closed statuses)   and NO date filter
+
+The date filter matters. Open backlog is a stock, not a flow: it is every record
+still open, whenever it was raised. Filter that search to the current day and it
+returns only today's open records, which is a different and much smaller number.
+
+Every output is a plain value, ready to map straight into an application field.
+
+Inputs
+------
+records                 the open search results
+period_mode             today | full_today | yesterday | date  (default full_today)
+snapshot_date           the day being recorded; also used to re-run a past day
+now                     optional run time, for reproducible re-runs
+previous_open_backlog   yesterday's open_inc_total, for the drift check
+previous_snapshot_date  yesterday's snapshot_date
+new_inc_total           today's value from Script B, for the drift check
+closed_inc_total        today's value from Script C, for the drift check
+field_map, closed_statuses, resolved_statuses, false_positive_values,
+false_positive_fields, p1p2_values, record_hierarchy_filter,
+suspect_minutes_over    see the helper block for the defaults
+
+Outputs
+-------
+open_inc_total, open_more_than_five_days, open_more_than_thirty_days,
+stale_open_no_update_5d, distinct_agents, oldest_open_age,
+age_open_inc_{avg,sum,p90,count}, age_last_update_open_inc_{...},
+state_dwell_hours_{...}, reassign_count_open_inc_{...},
+reassigned_open_count, reassign_count_hist_open_{...}
+
+expected_open_backlog, backlog_drift, is_seed_day, series_continuous,
+days_since_previous
+
+snapshot_date, coverage, breakdowns, oldest_open, metrics
+"""
+
+from __future__ import annotations
+
+import json
+import re
+from datetime import date, datetime, timedelta, timezone
+
+# ==========================================================================
+# shared helper block - keep byte-identical across scripts A, B and C
+# if your tenant supports a reusable Python component, lift this block
+# out of all three and reference the component instead
+# ==========================================================================
+
+UTC = timezone.utc
+
+# --------------------------------------------------------------------------
+# Field map - canonical name -> the CIM columns, first non-empty match wins.
+# Keys match case-insensitively and dotted paths reach into nested objects.
+# --------------------------------------------------------------------------
+
+DEFAULT_FIELD_MAP = {
+    "id": ["id", "recordId", "Tracking Id", "trackingId"],
+    "tracking_id": ["Tracking Id", "trackingId", "trackingFull"],
+    "alert_uid": ["Alert UID", "alertUid", "alert_uid"],
+    "title": ["Title", "title", "name"],
+    "assigned_to": ["Current Owner", "currentOwner", "assignedTo", "assignee"],
+    "severity": ["Severity", "severity", "priority", "Priority"],
+    "status": ["Status", "status", "state", "currentState"],
+    "type": ["Type", "type", "recordType"],
+    "record_hierarchy": ["Record-hierarchy", "recordHierarchy", "record_hierarchy"],
+    "classification": ["Classification", "classification"],
+    "manual_verdict": ["Manual Verdict", "manualVerdict", "manual_verdict"],
+    "alert_categories": ["Alert Categories", "alertCategories"],
+    "escalated": ["Escalated?", "Escalated", "escalated"],
+    "escalate_to": ["Escalate to?", "Escalate to", "escalateTo"],
+    "threat_type": ["Threat Type", "threatType"],
+    "mitre_technique": ["MITRE ATT&CK Technique", "mitreTechnique", "MITRE ATT&CK Techniques"],
+    "mitre_technique_count": ["MITRE ATT&CK Technique Count", "mitreTechniqueCount"],
+
+    "created_at": ["First Created", "firstCreated", "created", "createdDate"],
+    "updated_at": ["Last Updated", "lastUpdated", "modified", "updated"],
+    "closed_at": ["Time Resolved", "timeResolved", "closed", "closedDate"],
+    "remediated_at": ["Time of Remediation", "timeOfRemediation", "remediatedAt"],
+
+    # Durations: the text column carries sub-minute precision, the numeric one
+    # is truncated, so the text is preferred when both are present.
+    "tta_text": ["Time to Acknowledge", "timeToAcknowledge"],
+    "tta_minutes": ["Time to Acknowledge Minutes", "timeToAcknowledgeMinutes"],
+    "analyze_text": ["Time to Analyze (excluding pending)", "Time to Analyze", "timeToAnalyze"],
+    "analyze_minutes": ["Time to Analyze Minutes", "timeToAnalyzeMinutes"],
+    "remediate_text": ["Time to Remediate", "timeToRemediate"],
+    "remediate_minutes": ["Time to Remediate Minutes", "timeToRemediateMinutes"],
+
+    # Not present in the CIM table today. Map them here if you ever add them
+    # and the metrics that need them start reporting instead of going null.
+    "reassign_count": ["Reassign Count", "reassignCount"],
+    "risk_score": ["Risk Score", "riskScore"],
+    "sla_breached": ["SLA Breached", "slaBreached"],
+    "state_changed_at": ["State Changed", "stateChangedAt"],
+}
+
+#: Status values that mean the record has left the backlog.
+DEFAULT_CLOSED_STATUSES = [
+    "closed", "resolved", "completed", "done", "cancelled", "canceled",
+    "false positive", "false-positive", "duplicate", "rejected", "closed - benign",
+]
+
+#: The subset of closed statuses that count as genuinely worked and resolved.
+DEFAULT_RESOLVED_STATUSES = ["closed", "resolved", "completed", "done"]
+
+#: Values that mark a record as a false positive, in any of the verdict fields.
+DEFAULT_FALSE_POSITIVE_VALUES = [
+    "false positive", "false-positive", "fp", "benign", "closed - benign", "not malicious",
+]
+
+#: Fields checked for a false-positive verdict, in order.
+DEFAULT_FALSE_POSITIVE_FIELDS = ["status", "classification", "manual_verdict"]
+
+#: Severity values treated as P1/P2 for the high-risk metrics.
+DEFAULT_P1P2_VALUES = ["critical", "high", "p1", "p2", "1", "2"]
+
+#: A duration above this many minutes (one year) is treated as a bad value and
+#: excluded from the averages rather than being allowed to wreck them.
+DEFAULT_SUSPECT_MINUTES_OVER = 525600
+
+PRIORITY_ORDER = ["critical", "high", "medium", "low", "informational", "info"]
+
+_DATE_FORMATS = [
+    "%Y-%m-%dT%H:%M:%S.%f%z", "%Y-%m-%dT%H:%M:%S%z",
+    "%Y-%m-%dT%H:%M:%S.%f", "%Y-%m-%dT%H:%M:%S",
+    "%Y-%m-%d %H:%M:%S.%f", "%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M", "%Y-%m-%d",
+    "%b %d, %Y %I:%M %p", "%b %d, %Y %I:%M:%S %p", "%b %d, %Y",
+    "%d %b %Y %H:%M", "%m/%d/%Y %H:%M:%S", "%m/%d/%Y %H:%M", "%m/%d/%Y",
+]
+
+_DURATION_RE = re.compile(
+    r"(?P<value>\d+(?:\.\d+)?)\s*(?P<unit>ms|milliseconds?|s|secs?|seconds?|"
+    r"m|mins?|minutes?|h|hrs?|hours?|d|days?)\b",
+    re.IGNORECASE,
+)
+
+_DURATION_MINUTES = {
+    "ms": 1.0 / 60000.0, "millisecond": 1.0 / 60000.0, "milliseconds": 1.0 / 60000.0,
+    "s": 1.0 / 60.0, "sec": 1.0 / 60.0, "secs": 1.0 / 60.0,
+    "second": 1.0 / 60.0, "seconds": 1.0 / 60.0,
+    "m": 1.0, "min": 1.0, "mins": 1.0, "minute": 1.0, "minutes": 1.0,
+    "h": 60.0, "hr": 60.0, "hrs": 60.0, "hour": 60.0, "hours": 60.0,
+    "d": 1440.0, "day": 1440.0, "days": 1440.0,
+}
+
+
+# --------------------------------------------------------------------------
+# Turbine context plumbing
+# --------------------------------------------------------------------------
+
+def get_inputs(context):
+    """Return the action's input dict regardless of Turbine context shape."""
+    if context is None:
+        return {}
+    inputs = getattr(context, "inputs", None)
+    if isinstance(inputs, dict):
+        return inputs
+    if isinstance(context, dict):
+        if isinstance(context.get("inputs"), dict):
+            return context["inputs"]
+        return context
+    getter = getattr(context, "get", None)
+    if callable(getter):
+        try:
+            found = getter("inputs")
+        except TypeError:
+            found = None
+        if isinstance(found, dict):
+            return found
+    return {}
+
+
+def get_input(context, name, default=None):
+    """Read one input by name, falling back to ``default`` when blank."""
+    value = get_inputs(context).get(name, default)
+    if value is None or value == "" or value == []:
+        return default
+    return value
+
+
+# --------------------------------------------------------------------------
+# Field resolution
+# --------------------------------------------------------------------------
+
+def _flatten(record, prefix="", out=None):
+    if out is None:
+        out = {}
+    if not isinstance(record, dict):
+        return out
+    for key, value in record.items():
+        path = "{}.{}".format(prefix, key) if prefix else str(key)
+        out[path] = value
+        if isinstance(value, dict):
+            _flatten(value, path, out)
+    return out
+
+
+def pick_field(record, candidates, default=None):
+    """First non-empty value among ``candidates`` (case-insensitive keys)."""
+    if not isinstance(record, dict):
+        return default
+    flat = _flatten(record)
+    lowered = {k.lower(): v for k, v in flat.items()}
+    for candidate in candidates or []:
+        for key in (candidate, str(candidate).lower()):
+            if key in flat and flat[key] not in (None, ""):
+                return flat[key]
+            if key in lowered and lowered[key] not in (None, ""):
+                return lowered[key]
+    return default
+
+
+def merge_field_map(overrides):
+    """Layer playbook overrides on top of the defaults, overrides tried first."""
+    merged = {k: list(v) for k, v in DEFAULT_FIELD_MAP.items()}
+    for field, candidates in (overrides or {}).items():
+        if isinstance(candidates, str):
+            candidates = [candidates]
+        existing = merged.get(field, [])
+        merged[field] = list(candidates) + [c for c in existing if c not in candidates]
+    return merged
+
+
+def in_set(value, allowed):
+    """Case-insensitive membership test that tolerates None and stray spaces."""
+    if value is None:
+        return False
+    return str(value).strip().lower() in {str(a).strip().lower() for a in (allowed or [])}
+
+
+def is_truthy(value):
+    """Read a Swimlane yes/no, checkbox or boolean field."""
+    if isinstance(value, bool):
+        return value
+    return str(value).strip().lower() in ("true", "yes", "y", "1", "checked")
+
+
+# --------------------------------------------------------------------------
+# Dates and durations
+# --------------------------------------------------------------------------
+
+def parse_datetime(value):
+    """Parse the date shapes CIM records carry. Returns UTC-aware or None."""
+    if value is None or value == "":
+        return None
+    if isinstance(value, datetime):
+        return value if value.tzinfo else value.replace(tzinfo=UTC)
+    if isinstance(value, date):
+        return datetime(value.year, value.month, value.day, tzinfo=UTC)
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        seconds = float(value)
+        if seconds > 1e11:
+            seconds /= 1000.0
+        try:
+            return datetime.fromtimestamp(seconds, tz=UTC)
+        except (OverflowError, OSError, ValueError):
+            return None
+
+    text = str(value).strip()
+    if not text:
+        return None
+    if re.fullmatch(r"-?\d{10,13}", text):
+        return parse_datetime(int(text))
+
+    normalized = text.replace("Z", "+00:00").replace("z", "+00:00")
+    try:
+        parsed = datetime.fromisoformat(normalized)
+        return parsed if parsed.tzinfo else parsed.replace(tzinfo=UTC)
+    except ValueError:
+        pass
+
+    # Long-form display timestamps, plus fractional seconds longer than %f allows.
+    trimmed = re.sub(r"(\.\d{6})\d+", r"\1", text).replace(" ", " ")
+    for fmt in _DATE_FORMATS:
+        try:
+            parsed = datetime.strptime(trimmed, fmt)
+            return parsed if parsed.tzinfo else parsed.replace(tzinfo=UTC)
+        except ValueError:
+            continue
+    return None
+
+
+def to_iso(value):
+    """UTC ISO-8601 string, or None."""
+    parsed = parse_datetime(value)
+    return None if parsed is None else parsed.astimezone(UTC).isoformat().replace("+00:00", "Z")
+
+
+def day_key(value):
+    parsed = parse_datetime(value)
+    return None if parsed is None else parsed.astimezone(UTC).date().isoformat()
+
+
+def start_of_day(value):
+    parsed = parse_datetime(value)
+    if parsed is None:
+        return None
+    return parsed.astimezone(UTC).replace(hour=0, minute=0, second=0, microsecond=0)
+
+
+def hours_between(start, end):
+    a, b = parse_datetime(start), parse_datetime(end)
+    return None if a is None or b is None else (b - a).total_seconds() / 3600.0
+
+
+def days_between(start, end):
+    hours = hours_between(start, end)
+    return None if hours is None else hours / 24.0
+
+
+def parse_duration_minutes(text_value, numeric_value=None):
+    """Minutes from a compound "1h 2m 3s" string, else from a numeric column.
+
+    The text column keeps sub-minute precision that the numeric column throws
+    away, so it wins when both are present.
+    """
+    if text_value not in (None, ""):
+        text = str(text_value).strip()
+        matches = _DURATION_RE.findall(text)
+        if matches:
+            total = 0.0
+            for value, unit in matches:
+                total += float(value) * _DURATION_MINUTES[unit.lower()]
+            return round(total, 4)
+        # A bare number in the text column is already minutes.
+        try:
+            return round(float(text), 4)
+        except ValueError:
+            pass
+    if numeric_value not in (None, ""):
+        try:
+            return round(float(numeric_value), 4)
+        except (TypeError, ValueError):
+            return None
+    return None
+
+
+def day_span(start, end, max_days=400):
+    first, last = start_of_day(start), start_of_day(end)
+    if first is None or last is None or last < first:
+        return []
+    total = min((last - first).days + 1, max_days)
+    return [(first + timedelta(days=offset)).date() for offset in range(total)]
+
+
+def resolve_period(period, period_start, period_end, now=None):
+    """Turn a named period into a concrete UTC window; explicit dates win."""
+    now = parse_datetime(now) or datetime.now(UTC)
+    explicit_start = parse_datetime(period_start)
+    explicit_end = parse_datetime(period_end)
+    if explicit_start and explicit_end:
+        return explicit_start, explicit_end
+
+    name = (period or "last_30_days").strip().lower().replace("-", "_").replace(" ", "_")
+    today_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
+    end = now
+
+    if name in ("today", "day"):
+        start = today_start
+    elif name in ("last_24_hours", "24h"):
+        start = now - timedelta(hours=24)
+    elif name == "yesterday":
+        start = today_start - timedelta(days=1)
+        end = today_start - timedelta(microseconds=1)
+    elif name in ("last_7_days", "7d", "week"):
+        start = today_start - timedelta(days=6)
+    elif name in ("last_14_days", "14d"):
+        start = today_start - timedelta(days=13)
+    elif name in ("last_30_days", "30d", "month"):
+        start = today_start - timedelta(days=29)
+    elif name in ("last_90_days", "90d", "quarter"):
+        start = today_start - timedelta(days=89)
+    elif name in ("month_to_date", "mtd"):
+        start = today_start.replace(day=1)
+    elif name in ("last_month", "previous_month"):
+        first_this_month = today_start.replace(day=1)
+        end = first_this_month - timedelta(microseconds=1)
+        start = (first_this_month - timedelta(days=1)).replace(day=1)
+    elif name in ("year_to_date", "ytd"):
+        start = today_start.replace(month=1, day=1)
+    else:
+        start = today_start - timedelta(days=29)
+
+    return (explicit_start or start), (explicit_end or end)
+
+
+# --------------------------------------------------------------------------
+# Stats
+# --------------------------------------------------------------------------
+
+def mean(values):
+    clean = [v for v in values if v is not None]
+    return round(sum(clean) / len(clean), 2) if clean else None
+
+
+def median(values):
+    clean = sorted(v for v in values if v is not None)
+    if not clean:
+        return None
+    mid = len(clean) // 2
+    if len(clean) % 2:
+        return round(clean[mid], 2)
+    return round((clean[mid - 1] + clean[mid]) / 2.0, 2)
+
+
+def percentile(values, pct_rank):
+    clean = sorted(v for v in values if v is not None)
+    if not clean:
+        return None
+    rank = max(1, min(len(clean), int(round((pct_rank / 100.0) * len(clean) + 0.5))))
+    return round(clean[rank - 1], 2)
+
+
+def pct(part, whole, digits=2):
+    if not whole:
+        return 0.0
+    return round((float(part) / float(whole)) * 100.0, digits)
+
+
+def stats(values, digits=2):
+    """Sum/mean/min/max/p50/p90 for the metrics defined as a value, not a count.
+
+    ``count`` is how many records actually carried the value, which is not the
+    same as the size of the base when a column is sparsely populated.
+    """
+    clean = [float(v) for v in values if v is not None]
+    if not clean:
+        return {"count": 0, "sum": None, "avg": None, "min": None,
+                "max": None, "p50": None, "p90": None}
+    return {
+        "count": len(clean),
+        "sum": round(sum(clean), digits),
+        "avg": round(sum(clean) / len(clean), digits),
+        "min": round(min(clean), digits),
+        "max": round(max(clean), digits),
+        "p50": median(clean),
+        "p90": percentile(clean, 90),
+    }
+
+
+def count_by(records, key, top=None, order=None):
+    counts = {}
+    for record in records:
+        value = record.get(key) or "Unassigned"
+        counts[str(value)] = counts.get(str(value), 0) + 1
+
+    def sort_key(item):
+        label, total = item
+        if order:
+            try:
+                return (0, order.index(label.strip().lower()), -total, label)
+            except ValueError:
+                return (1, 0, -total, label)
+        return (0, 0, -total, label)
+
+    ranked = sorted(counts.items(), key=sort_key)
+    if top:
+        ranked = ranked[:top]
+    return [{"label": label, "count": total} for label, total in ranked]
+
+
+def resolve_day_window(period_mode, snapshot_date=None, now=None):
+    """The window for one daily snapshot, plus the date that names the record.
+
+    ``today``      00:00 today  -> the moment the job runs (a partial day)
+    ``full_today`` 00:00 today  -> 23:59:59.999999 today
+    ``yesterday``  the complete previous day
+    ``date``       the complete day given by ``snapshot_date``
+
+    The returned ``date`` is what the KPI record is keyed on, so a re-run on the
+    same day updates that day's record instead of adding a second one.
+    """
+    run_at = parse_datetime(now) or datetime.now(UTC)
+    mode = (period_mode or "today").strip().lower().replace("-", "_")
+    midnight = run_at.replace(hour=0, minute=0, second=0, microsecond=0)
+    day_end = timedelta(days=1) - timedelta(microseconds=1)
+
+    explicit = parse_datetime(snapshot_date)
+    if mode == "date" or explicit is not None:
+        if explicit is None:
+            raise ValueError("period_mode 'date' needs a snapshot_date input")
+        start = explicit.astimezone(UTC).replace(hour=0, minute=0, second=0, microsecond=0)
+        return start, start + day_end, start.date().isoformat()
+    if mode == "yesterday":
+        start = midnight - timedelta(days=1)
+        return start, start + day_end, start.date().isoformat()
+    if mode == "full_today":
+        return midnight, midnight + day_end, midnight.date().isoformat()
+    return midnight, run_at, midnight.date().isoformat()
+
+
+def normalize_records(raw_records, options, end):
+    """Map raw CIM records onto canonical names and derive the per-record values.
+
+    ``end`` is the period end: ages and dwell times are measured against it, so a
+    re-run of a past day describes that day rather than today.
+
+    Returns (records, skipped, suspect_durations, filtered_out).
+    """
+    fields = merge_field_map(options.get("field_map"))
+    closed_statuses = options.get("closed_statuses") or DEFAULT_CLOSED_STATUSES
+    resolved_statuses = options.get("resolved_statuses") or DEFAULT_RESOLVED_STATUSES
+    fp_values = options.get("false_positive_values") or DEFAULT_FALSE_POSITIVE_VALUES
+    fp_fields = options.get("false_positive_fields") or DEFAULT_FALSE_POSITIVE_FIELDS
+    p1p2_values = options.get("p1p2_values") or DEFAULT_P1P2_VALUES
+    hierarchy_filter = clean_text(options.get("record_hierarchy_filter"))
+    cap = float(options.get("suspect_minutes_over") or DEFAULT_SUSPECT_MINUTES_OVER)
+
+    records, skipped = [], []
+    suspect_durations = 0
+    filtered_out = 0
+
+    for index, raw in enumerate(as_list(raw_records)):
+        if not isinstance(raw, dict):
+            skipped.append({"index": index, "reason": "record is not an object"})
+            continue
+
+        hierarchy = clean_text(pick_field(raw, fields["record_hierarchy"]))
+        if hierarchy_filter and not in_set(hierarchy, [hierarchy_filter]):
+            filtered_out += 1
+            continue
+
+        created_at = parse_datetime(pick_field(raw, fields["created_at"]))
+        if created_at is None:
+            skipped.append({
+                "index": index,
+                "id": clean_text(pick_field(raw, fields["tracking_id"])),
+                "reason": "missing or unparsable created date",
+            })
+            continue
+
+        status = clean_text(pick_field(raw, fields["status"]))
+        classification = clean_text(pick_field(raw, fields["classification"]))
+        manual_verdict = clean_text(pick_field(raw, fields["manual_verdict"]))
+        updated_at = parse_datetime(pick_field(raw, fields["updated_at"]))
+        closed_at = parse_datetime(pick_field(raw, fields["closed_at"]))
+        remediated_at = parse_datetime(pick_field(raw, fields["remediated_at"]))
+        state_changed_at = parse_datetime(pick_field(raw, fields["state_changed_at"]))
+
+        verdicts = {"status": status, "classification": classification,
+                    "manual_verdict": manual_verdict}
+        is_false_positive = any(in_set(verdicts.get(name), fp_values)
+                                for name in fp_fields)
+        is_closed_state = in_set(status, closed_statuses)
+        is_resolved_state = in_set(status, resolved_statuses)
+        severity = clean_text(pick_field(raw, fields["severity"]))
+
+        # The spec's COALESCE(closed_at, updated_at); a remediation time sits
+        # between them because it is a closure time when one was recorded.
+        effective_closed_at = closed_at or remediated_at or updated_at
+
+        tta, tta_bad = duration_minutes(raw, fields, "tta_text", "tta_minutes", cap)
+        analyze, analyze_bad = duration_minutes(
+            raw, fields, "analyze_text", "analyze_minutes", cap)
+        remediate, remediate_bad = duration_minutes(
+            raw, fields, "remediate_text", "remediate_minutes", cap)
+        suspect_durations += sum([tta_bad, analyze_bad, remediate_bad])
+
+        # A zero duration with no matching timestamp is a default, not a
+        # measurement, so it must not pull an average down to zero.
+        if remediate == 0 and remediated_at is None:
+            remediate = None
+
+        dwell_from = state_changed_at or updated_at or created_at
+
+        records.append({
+            "tracking_id": clean_text(pick_field(raw, fields["tracking_id"])) or "row-{}".format(index),
+            "alert_uid": clean_text(pick_field(raw, fields["alert_uid"])),
+            "title": clean_text(pick_field(raw, fields["title"])),
+            "assigned_to": clean_text(pick_field(raw, fields["assigned_to"])),
+            "severity": severity,
+            "status": status,
+            "type": clean_text(pick_field(raw, fields["type"])),
+            "record_hierarchy": hierarchy,
+            "classification": classification,
+            "manual_verdict": manual_verdict,
+            "threat_type": clean_text(pick_field(raw, fields["threat_type"])),
+            "mitre_technique": clean_text(pick_field(raw, fields["mitre_technique"])),
+            "escalated": is_truthy(pick_field(raw, fields["escalated"])),
+
+            "created_at": to_iso(created_at),
+            "updated_at": to_iso(updated_at),
+            "closed_at": to_iso(closed_at),
+            "effective_closed_at": to_iso(effective_closed_at),
+
+            "is_closed_state": is_closed_state,
+            "is_resolved_state": is_resolved_state,
+            "is_false_positive": is_false_positive,
+            "is_p1p2": in_set(severity, p1p2_values),
+            "is_truly_resolved": is_resolved_state and not is_false_positive,
+
+            "age_days": round((end - created_at).total_seconds() / 86400.0, 4),
+            "days_since_update": (None if updated_at is None else
+                                  round((end - updated_at).total_seconds() / 86400.0, 4)),
+            "duration_hours": (None if effective_closed_at is None else
+                               round((effective_closed_at - created_at).total_seconds() / 3600.0, 4)),
+            "dwell_hours": round((end - dwell_from).total_seconds() / 3600.0, 4),
+            "same_day_close": (effective_closed_at is not None
+                               and effective_closed_at.date() == created_at.date()),
+
+            "tta_minutes": tta,
+            "analyze_minutes": analyze,
+            "remediate_minutes": remediate,
+
+            # Reserved: these stay None until the CIM record carries them, and
+            # the metrics that need them report as unavailable rather than 0.
+            "reassign_count": to_number(pick_field(raw, fields["reassign_count"])),
+            "risk_score": to_number(pick_field(raw, fields["risk_score"])),
+            "sla_breached": (None if pick_field(raw, fields["sla_breached"]) is None
+                             else is_truthy(pick_field(raw, fields["sla_breached"]))),
+        })
+
+    return records, skipped, suspect_durations, filtered_out
+
+
+def as_list(value):
+    """Turbine sometimes hands a JSON string where a list is expected."""
+    if value is None:
+        return []
+    if isinstance(value, list):
+        return value
+    if isinstance(value, dict):
+        for key in ("records", "results", "items", "data", "value"):
+            if isinstance(value.get(key), list):
+                return value[key]
+        return [value]
+    if isinstance(value, str):
+        text = value.strip()
+        if not text:
+            return []
+        try:
+            return as_list(json.loads(text))
+        except (TypeError, ValueError):
+            return []
+    return []
+
+
+def clean_text(value):
+    if value is None:
+        return None
+    text = str(value).strip()
+    return text or None
+
+
+def to_number(value):
+    if value in (None, ""):
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def duration_minutes(record, fields, text_key, minutes_key, cap):
+    """Minutes from the text column first, the numeric column second.
+
+    Returns (minutes, was_suspect). A value beyond the cap is dropped rather than
+    allowed into an average, because the numeric columns do not all agree on
+    their unit.
+    """
+    minutes = parse_duration_minutes(
+        pick_field(record, fields[text_key]),
+        pick_field(record, fields[minutes_key]),
+    )
+    if minutes is None:
+        return None, False
+    if minutes > cap or minutes < 0:
+        return None, True
+    return minutes, False
+
+
+def read_options(context):
+    """The configuration inputs every one of the three scripts shares."""
+    return {
+        "field_map": get_input(context, "field_map"),
+        "closed_statuses": get_input(context, "closed_statuses"),
+        "resolved_statuses": get_input(context, "resolved_statuses"),
+        "false_positive_values": get_input(context, "false_positive_values"),
+        "false_positive_fields": get_input(context, "false_positive_fields"),
+        "p1p2_values": get_input(context, "p1p2_values"),
+        "record_hierarchy_filter": get_input(context, "record_hierarchy_filter"),
+        "suspect_minutes_over": get_input(context, "suspect_minutes_over"),
+    }
+
+
+def field_coverage(records, needed):
+    """Which reserved fields carried data, so a metric can say why it is null."""
+    return {name: any(r.get(name) not in (None, "") for r in records)
+            for name in needed}
+
+
+def blocked(reason):
+    """A metric that cannot be computed: null plus the reason, never 0."""
+    return {"value": None, "status": "unavailable", "reason": reason}
+
+
+def ok(value, note=None):
+    return {"value": value, "status": "proxy" if note else "ok", "reason": note}
+
+
+def flatten_metrics(metrics, prefix=""):
+    """Flatten the catalog into the scalars an application field can hold.
+
+    A value metric expands to Avg/Sum/P90/Count. A metric that is unavailable
+    still writes every one of its columns as null, so the application's field
+    set does not change shape on the day a source field is added.
+    """
+    flat = {}
+    for key in sorted(metrics):
+        entry = metrics[key]
+        value = entry.get("value")
+        if entry.get("kind", "").startswith("value"):
+            parts = value if isinstance(value, dict) else {}
+            for part in ("avg", "sum", "p90", "count"):
+                flat["{}{}_{}".format(prefix, key, part)] = parts.get(part)
+        else:
+            flat[prefix + key] = value
+    return flat
+
+# ==========================================================================
+# end shared helper block
+# ==========================================================================
+
+
+def compute_open_metrics(records, end):
+    """The twelve open-base metrics."""
+    have = field_coverage(records, ["reassign_count"])
+
+    ages = [r.get("age_days") for r in records]
+    since_update = [r.get("days_since_update") for r in records]
+    unassigned = [r for r in records if not r.get("assigned_to")]
+
+    metrics = {
+        "open_inc_total": dict(ok(len(records)), kind="count"),
+        "open_more_than_five_days": dict(
+            ok(sum(1 for a in ages if (a or 0) > 5)), kind="count"),
+        "open_more_than_thirty_days": dict(
+            ok(sum(1 for a in ages if (a or 0) > 30)), kind="count"),
+        "stale_open_no_update_5d": dict(
+            ok(sum(1 for d in since_update if (d or 0) > 5)), kind="count"),
+        "distinct_agents": dict(
+            ok(len({r["assigned_to"] for r in records if r.get("assigned_to")})),
+            kind="count"),
+        "unassigned_open_count": dict(ok(len(unassigned)), kind="count"),
+        "oldest_open_age": dict(
+            ok(round(max(ages), 2) if ages else None), kind="days"),
+
+        "age_open_inc": dict(ok(stats(ages)), kind="value_days"),
+        "age_last_update_open_inc": dict(ok(stats(since_update)), kind="value_days"),
+
+        # Without a state-changed timestamp this is hours since the last update,
+        # which equals the specified measure only when that update was the state
+        # change. Marked as a proxy rather than passed off as exact.
+        "state_dwell_hours": dict(
+            ok(stats([r.get("dwell_hours") for r in records]),
+               "hours since last update, not since the state change"),
+            kind="value_hours"),
+    }
+
+    if have["reassign_count"]:
+        counts = [r.get("reassign_count") for r in records]
+        metrics["reassign_count_open_inc"] = dict(ok(stats(counts)), kind="value")
+        metrics["reassigned_open_count"] = dict(
+            ok(sum(1 for c in counts if (c or 0) > 0)), kind="count")
+        metrics["reassign_count_hist_open"] = dict(ok(stats(counts)), kind="value")
+    else:
+        why = "needs a reassign count field on the CIM record"
+        metrics["reassign_count_open_inc"] = dict(blocked(why), kind="value")
+        metrics["reassigned_open_count"] = dict(blocked(why), kind="count")
+        metrics["reassign_count_hist_open"] = dict(
+            blocked("needs assignment history, or a reassign count field"),
+            kind="value")
+    return metrics
+
+
+def check_continuity(open_total, previous_open, previous_date, snapshot_date,
+                     new_total, closed_total):
+    """Reconcile today's measured backlog with yesterday's.
+
+    The recurrence is  open_today = open_yesterday + new_today - closed_today.
+    Closures have to be subtracted; carrying yesterday forward and only adding
+    today's new records rises every day and never falls.
+
+    This is a check, not the source of truth. open_inc_total is measured
+    directly by the open search. A non-zero drift usually means a record was
+    closed retroactively, a status changed outside the window, or a search
+    missed rows, all of which are worth seeing.
+    """
+    previous_open = to_number(previous_open)
+    new_total = to_number(new_total)
+    closed_total = to_number(closed_total)
+
+    today = parse_datetime(snapshot_date)
+    yesterday = parse_datetime(previous_date)
+    gap = None
+    if today is not None and yesterday is not None:
+        gap = (today.date() - yesterday.date()).days
+
+    if previous_open is None:
+        return {"is_seed_day": True, "expected_open_backlog": None,
+                "backlog_drift": None, "series_continuous": True,
+                "days_since_previous": gap,
+                "continuity_note": "first run: the measured backlog seeds the series"}
+
+    if gap is not None and gap != 1:
+        return {"is_seed_day": False, "expected_open_backlog": None,
+                "backlog_drift": None, "series_continuous": False,
+                "days_since_previous": gap,
+                "continuity_note": ("the previous record is {} days back, so the "
+                                    "carry-forward cannot span the gap. Backfill "
+                                    "with period_mode 'date'.".format(gap))}
+
+    if None in (new_total, closed_total):
+        return {"is_seed_day": False, "expected_open_backlog": None,
+                "backlog_drift": None, "series_continuous": True,
+                "days_since_previous": gap,
+                "continuity_note": ("wire new_inc_total from Script B and "
+                                    "closed_inc_total from Script C to enable "
+                                    "the drift check")}
+
+    expected = previous_open + new_total - closed_total
+    return {
+        "is_seed_day": False,
+        "expected_open_backlog": expected,
+        "backlog_drift": (None if open_total is None
+                          else round(open_total - expected, 2)),
+        "series_continuous": True,
+        "days_since_previous": gap,
+        "continuity_note": "expected = previous {} + new {} - closed {}".format(
+            previous_open, new_total, closed_total),
+    }
+
+
+def main(context=None):
+    start, end, snapshot = resolve_day_window(
+        get_input(context, "period_mode", "full_today"),
+        get_input(context, "snapshot_date"),
+        get_input(context, "now"),
+    )
+
+    records, skipped, suspect, filtered = normalize_records(
+        get_input(context, "records", []), read_options(context), end)
+
+    # A record raised after the day being recorded is not yet part of that day's
+    # backlog. This only bites when re-running a past date.
+    future = [r for r in records
+              if (parse_datetime(r.get("created_at")) or end) > end]
+    records = [r for r in records if r not in future]
+
+    # The open search should return nothing already closed. If it does, the
+    # filter and the closed-status list have drifted apart.
+    closed_looking = [r for r in records if r.get("is_closed_state")]
+
+    metrics = compute_open_metrics(records, end)
+    result = flatten_metrics(metrics)
+    result.update(check_continuity(
+        metrics["open_inc_total"]["value"],
+        get_input(context, "previous_open_backlog"),
+        get_input(context, "previous_snapshot_date"),
+        snapshot,
+        get_input(context, "new_inc_total"),
+        get_input(context, "closed_inc_total"),
+    ))
+
+    result.update({
+        "snapshot_date": snapshot,
+        "period_start": to_iso(start),
+        "period_end": to_iso(end),
+        "metrics": metrics,
+        "breakdowns": {
+            "open_by_severity": count_by(records, "severity", order=PRIORITY_ORDER),
+            "open_by_status": count_by(records, "status"),
+            "open_by_owner": count_by(records, "assigned_to", top=10),
+            "open_by_threat_type": count_by(records, "threat_type", top=10),
+        },
+        "oldest_open": [
+            {"tracking_id": r.get("tracking_id"), "severity": r.get("severity"),
+             "assigned_to": r.get("assigned_to"), "status": r.get("status"),
+             "age_days": round(r.get("age_days") or 0, 2)}
+            for r in sorted(records, key=lambda r: r.get("age_days") or 0,
+                            reverse=True)[:10]
+        ],
+        "coverage": {
+            "rows_fetched": len(records) + len(skipped) + filtered + len(future),
+            "records_used": len(records),
+            "records_skipped": len(skipped),
+            "records_filtered_by_hierarchy": filtered,
+            "records_created_after_period": len(future),
+            "records_in_closed_status": len(closed_looking),
+            "suspect_durations_dropped": suspect,
+            "unavailable": {k: m["reason"] for k, m in metrics.items()
+                            if m["status"] == "unavailable"},
+            "proxied": {k: m["reason"] for k, m in metrics.items()
+                        if m["status"] == "proxy"},
+            "skipped_detail": skipped[:50],
+            "warning": ("the open search returned {} record(s) already in a "
+                        "closed status: check its filter against your closed "
+                        "status list".format(len(closed_looking))
+                        if closed_looking else None),
+        },
+    })
+    return result

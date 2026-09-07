@@ -1,52 +1,29 @@
-"""Script A of 3 - normalize CIM records and classify the three metric bases.
+"""Script B - NEW incident metrics.
 
-Runs once per day from the cron trigger. Everything downstream reads this
-action's output, so this is the only script that knows your CIM column names.
+Feed this the records array from the Search Records action that finds records
+raised in the day being recorded:
+
+    created within the day
+
+Every output is a plain value, ready to map straight into an application field.
 
 Inputs
 ------
-One search per base is the clearest wiring, and each maps to an input:
-
-    open_records     Status NOT IN closed statuses, NO date filter
-    new_records      created within the day
-    closed_records   closed within the day
-
-Pass whichever you have. A base with its own search is taken from that search;
-a base without one is derived from the date conditions applied to whatever
-records did arrive, and is suppressed downstream if the fetch cannot support it.
-
-records                  a single mixed search, when not using per-base searches
-open_records             the open-backlog search (alias: backlog_records)
-new_records              the new-today search
-closed_records           the closed-today search
-base_assignment          auto | search | condition  (default auto: trust a
-                         search where one was given, else the date conditions)
-data_scope               auto | full | day_created | day_updated |
-                         day_plus_backlog  (default auto). Auto never assumes
-                         "full"; declare it when the search has no date filter
-period_mode              today | full_today | yesterday | date   (default today)
-snapshot_date            ISO date, required when period_mode is "date"; also used
-                         on its own to re-run a past day
-now                      optional ISO run time, for deterministic re-runs
-field_map                optional canonical name -> your CIM key(s)
-closed_statuses          statuses that mean the record left the backlog
-resolved_statuses        the subset that counts as genuinely resolved
-false_positive_values    values that mark a false positive
-false_positive_fields    which fields carry the verdict (default status,
-                         classification, manual_verdict)
-p1p2_values              severity values treated as P1/P2 (default critical, high)
-record_hierarchy_filter  optional: keep only "Parent" or only "Child" rows
-suspect_minutes_over     durations above this are treated as bad data
+records        the new-today search results
+period_mode    today | full_today | yesterday | date  (default full_today)
+snapshot_date  the day being recorded
+now            optional run time, for reproducible re-runs
+field_map, closed_statuses, resolved_statuses, false_positive_values,
+false_positive_fields, p1p2_values, record_hierarchy_filter,
+suspect_minutes_over   see the helper block for the defaults
 
 Outputs
 -------
-records   canonical records carrying in_open / in_new / in_closed, plus the
-          cond_* flags the date conditions produced and the searches each
-          record arrived from
-period    start, end, date, key - the day this snapshot is for
-coverage  which canonical fields resolved, what was skipped, suspect durations,
-          and which metric bases the fetched data can actually measure
-summary   counts, so the playbook can stop early on an empty day
+new_inc_total, new_inc_p1p2_count, new_inc_escalated_count,
+mtta_hours_{avg,sum,p90,count}, mtta_minutes_{...},
+sla_breached_count, sla_breach_rate, sla_compliance_rate
+
+snapshot_date, coverage, breakdowns, metrics
 """
 
 from __future__ import annotations
@@ -503,12 +480,132 @@ def resolve_day_window(period_mode, snapshot_date=None, now=None):
         return midnight, midnight + day_end, midnight.date().isoformat()
     return midnight, run_at, midnight.date().isoformat()
 
-# ==========================================================================
-# end shared helper block
-# ==========================================================================
+
+def normalize_records(raw_records, options, end):
+    """Map raw CIM records onto canonical names and derive the per-record values.
+
+    ``end`` is the period end: ages and dwell times are measured against it, so a
+    re-run of a past day describes that day rather than today.
+
+    Returns (records, skipped, suspect_durations, filtered_out).
+    """
+    fields = merge_field_map(options.get("field_map"))
+    closed_statuses = options.get("closed_statuses") or DEFAULT_CLOSED_STATUSES
+    resolved_statuses = options.get("resolved_statuses") or DEFAULT_RESOLVED_STATUSES
+    fp_values = options.get("false_positive_values") or DEFAULT_FALSE_POSITIVE_VALUES
+    fp_fields = options.get("false_positive_fields") or DEFAULT_FALSE_POSITIVE_FIELDS
+    p1p2_values = options.get("p1p2_values") or DEFAULT_P1P2_VALUES
+    hierarchy_filter = clean_text(options.get("record_hierarchy_filter"))
+    cap = float(options.get("suspect_minutes_over") or DEFAULT_SUSPECT_MINUTES_OVER)
+
+    records, skipped = [], []
+    suspect_durations = 0
+    filtered_out = 0
+
+    for index, raw in enumerate(as_list(raw_records)):
+        if not isinstance(raw, dict):
+            skipped.append({"index": index, "reason": "record is not an object"})
+            continue
+
+        hierarchy = clean_text(pick_field(raw, fields["record_hierarchy"]))
+        if hierarchy_filter and not in_set(hierarchy, [hierarchy_filter]):
+            filtered_out += 1
+            continue
+
+        created_at = parse_datetime(pick_field(raw, fields["created_at"]))
+        if created_at is None:
+            skipped.append({
+                "index": index,
+                "id": clean_text(pick_field(raw, fields["tracking_id"])),
+                "reason": "missing or unparsable created date",
+            })
+            continue
+
+        status = clean_text(pick_field(raw, fields["status"]))
+        classification = clean_text(pick_field(raw, fields["classification"]))
+        manual_verdict = clean_text(pick_field(raw, fields["manual_verdict"]))
+        updated_at = parse_datetime(pick_field(raw, fields["updated_at"]))
+        closed_at = parse_datetime(pick_field(raw, fields["closed_at"]))
+        remediated_at = parse_datetime(pick_field(raw, fields["remediated_at"]))
+        state_changed_at = parse_datetime(pick_field(raw, fields["state_changed_at"]))
+
+        verdicts = {"status": status, "classification": classification,
+                    "manual_verdict": manual_verdict}
+        is_false_positive = any(in_set(verdicts.get(name), fp_values)
+                                for name in fp_fields)
+        is_closed_state = in_set(status, closed_statuses)
+        is_resolved_state = in_set(status, resolved_statuses)
+        severity = clean_text(pick_field(raw, fields["severity"]))
+
+        # The spec's COALESCE(closed_at, updated_at); a remediation time sits
+        # between them because it is a closure time when one was recorded.
+        effective_closed_at = closed_at or remediated_at or updated_at
+
+        tta, tta_bad = duration_minutes(raw, fields, "tta_text", "tta_minutes", cap)
+        analyze, analyze_bad = duration_minutes(
+            raw, fields, "analyze_text", "analyze_minutes", cap)
+        remediate, remediate_bad = duration_minutes(
+            raw, fields, "remediate_text", "remediate_minutes", cap)
+        suspect_durations += sum([tta_bad, analyze_bad, remediate_bad])
+
+        # A zero duration with no matching timestamp is a default, not a
+        # measurement, so it must not pull an average down to zero.
+        if remediate == 0 and remediated_at is None:
+            remediate = None
+
+        dwell_from = state_changed_at or updated_at or created_at
+
+        records.append({
+            "tracking_id": clean_text(pick_field(raw, fields["tracking_id"])) or "row-{}".format(index),
+            "alert_uid": clean_text(pick_field(raw, fields["alert_uid"])),
+            "title": clean_text(pick_field(raw, fields["title"])),
+            "assigned_to": clean_text(pick_field(raw, fields["assigned_to"])),
+            "severity": severity,
+            "status": status,
+            "type": clean_text(pick_field(raw, fields["type"])),
+            "record_hierarchy": hierarchy,
+            "classification": classification,
+            "manual_verdict": manual_verdict,
+            "threat_type": clean_text(pick_field(raw, fields["threat_type"])),
+            "mitre_technique": clean_text(pick_field(raw, fields["mitre_technique"])),
+            "escalated": is_truthy(pick_field(raw, fields["escalated"])),
+
+            "created_at": to_iso(created_at),
+            "updated_at": to_iso(updated_at),
+            "closed_at": to_iso(closed_at),
+            "effective_closed_at": to_iso(effective_closed_at),
+
+            "is_closed_state": is_closed_state,
+            "is_resolved_state": is_resolved_state,
+            "is_false_positive": is_false_positive,
+            "is_p1p2": in_set(severity, p1p2_values),
+            "is_truly_resolved": is_resolved_state and not is_false_positive,
+
+            "age_days": round((end - created_at).total_seconds() / 86400.0, 4),
+            "days_since_update": (None if updated_at is None else
+                                  round((end - updated_at).total_seconds() / 86400.0, 4)),
+            "duration_hours": (None if effective_closed_at is None else
+                               round((effective_closed_at - created_at).total_seconds() / 3600.0, 4)),
+            "dwell_hours": round((end - dwell_from).total_seconds() / 3600.0, 4),
+            "same_day_close": (effective_closed_at is not None
+                               and effective_closed_at.date() == created_at.date()),
+
+            "tta_minutes": tta,
+            "analyze_minutes": analyze,
+            "remediate_minutes": remediate,
+
+            # Reserved: these stay None until the CIM record carries them, and
+            # the metrics that need them report as unavailable rather than 0.
+            "reassign_count": to_number(pick_field(raw, fields["reassign_count"])),
+            "risk_score": to_number(pick_field(raw, fields["risk_score"])),
+            "sla_breached": (None if pick_field(raw, fields["sla_breached"]) is None
+                             else is_truthy(pick_field(raw, fields["sla_breached"]))),
+        })
+
+    return records, skipped, suspect_durations, filtered_out
 
 
-def _as_list(value):
+def as_list(value):
     """Turbine sometimes hands a JSON string where a list is expected."""
     if value is None:
         return []
@@ -524,23 +621,32 @@ def _as_list(value):
         if not text:
             return []
         try:
-            return _as_list(json.loads(text))
+            return as_list(json.loads(text))
         except (TypeError, ValueError):
             return []
     return []
 
 
-def _clean(value):
+def clean_text(value):
     if value is None:
         return None
     text = str(value).strip()
     return text or None
 
 
-def _duration(record, fields, text_key, minutes_key, cap):
+def to_number(value):
+    if value in (None, ""):
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def duration_minutes(record, fields, text_key, minutes_key, cap):
     """Minutes from the text column first, the numeric column second.
 
-    Returns (minutes, was_suspect). A value above the cap is dropped rather than
+    Returns (minutes, was_suspect). A value beyond the cap is dropped rather than
     allowed into an average, because the numeric columns do not all agree on
     their unit.
     """
@@ -555,322 +661,9 @@ def _duration(record, fields, text_key, minutes_key, cap):
     return minutes, False
 
 
-#: What each scope can honestly measure. A base that is not measurable has its
-#: metrics stored as null with a reason, rather than a number computed from a
-#: slice of data that cannot support it.
-SCOPE_RULES = {
-    "full": (True, True, "search returns all records"),
-    "day_plus_backlog": (True, True, "day slice plus a full open-backlog search"),
-    "day_updated": (False, True,
-                    "search returns one day filtered on last-updated, so records "
-                    "left untouched today are absent and the backlog is unknown"),
-    "day_created": (False, False,
-                    "search returns one day filtered on created date, so neither "
-                    "the standing backlog nor older records closed today are present"),
-}
-
-
-def resolve_scope(declared, has_backlog, records, start):
-    """Work out what the fetched data can support, if it was not declared.
-
-    Auto-detection never concludes "full". A day search filtered on last-updated
-    returns records created months ago, so a full search and a one-day slice look
-    identical from the data alone. Guessing "full" would silently compute a
-    backlog from a partial fetch, which is the one failure worth designing out,
-    so ``full`` has to be declared deliberately.
-    """
-    declared = (declared or "auto").strip().lower()
-    if declared in SCOPE_RULES:
-        return declared
-    if has_backlog:
-        return "day_plus_backlog"
-    if records and all((parse_datetime(r.get("created_at")) or start) >= start
-                       for r in records):
-        return "day_created"
-    return "day_updated"
-
-
-def dedupe(records):
-    """One row per record when the searches overlap; newest update wins.
-
-    A record found by more than one search keeps every search it came from, so
-    base membership survives the merge.
-    """
-    best = {}
-    for record in records:
-        key = record.get("tracking_id") or record.get("alert_uid")
-        current = best.get(key)
-        if current is None:
-            best[key] = record
-            continue
-        sources = current["_sources"] | record["_sources"]
-        a = parse_datetime(record.get("updated_at"))
-        b = parse_datetime(current.get("updated_at"))
-        winner = record if (a is not None and (b is None or a > b)) else current
-        winner["_sources"] = sources
-        best[key] = winner
-    return list(best.values())
-
-
-def assign_bases(records, searched_bases, mode="auto"):
-    """Decide in_open / in_new / in_closed, and cross-check the two answers.
-
-    Where a base has its own search, that search is the authority: it is what the
-    CIM app itself considers open, new or closed. The date conditions still run,
-    and any disagreement is reported rather than hidden, because a gap between
-    them usually means a search filter and the metric spec have drifted apart.
-    """
-    mode = (mode or "auto").strip().lower()
-    disagreement = {}
-    for base in ("open", "new", "closed"):
-        by_search = base in searched_bases
-        use_search = (mode == "search") or (mode == "auto" and by_search)
-        cond_key, in_key = "cond_" + base, "in_" + base
-
-        for record in records:
-            if use_search:
-                record[in_key] = base in record["_sources"]
-            else:
-                record[in_key] = record[cond_key]
-
-        if by_search:
-            from_search = sum(1 for r in records if base in r["_sources"])
-            from_cond = sum(1 for r in records if r[cond_key])
-            if from_search != from_cond:
-                disagreement[base] = {
-                    "from_search": from_search,
-                    "from_condition": from_cond,
-                    "delta": from_search - from_cond,
-                }
-    return disagreement
-
-
-def normalize(raw_records, options):
-    fields = merge_field_map(options.get("field_map"))
-    closed_statuses = options.get("closed_statuses") or DEFAULT_CLOSED_STATUSES
-    resolved_statuses = options.get("resolved_statuses") or DEFAULT_RESOLVED_STATUSES
-    fp_values = options.get("false_positive_values") or DEFAULT_FALSE_POSITIVE_VALUES
-    fp_fields = options.get("false_positive_fields") or DEFAULT_FALSE_POSITIVE_FIELDS
-    p1p2_values = options.get("p1p2_values") or DEFAULT_P1P2_VALUES
-    hierarchy_filter = _clean(options.get("record_hierarchy_filter"))
-    cap = float(options.get("suspect_minutes_over") or DEFAULT_SUSPECT_MINUTES_OVER)
-
-    start = options["start"]
-    end = options["end"]
-
-    normalized, skipped = [], []
-    suspect_durations = 0
-    filtered_out = 0
-
-    for index, raw in enumerate(_as_list(raw_records)):
-        if not isinstance(raw, dict):
-            skipped.append({"index": index, "reason": "record is not an object"})
-            continue
-
-        hierarchy = _clean(pick_field(raw, fields["record_hierarchy"]))
-        if hierarchy_filter and not in_set(hierarchy, [hierarchy_filter]):
-            filtered_out += 1
-            continue
-
-        created_at = parse_datetime(pick_field(raw, fields["created_at"]))
-        if created_at is None:
-            skipped.append({
-                "index": index,
-                "id": _clean(pick_field(raw, fields["tracking_id"])),
-                "reason": "missing or unparsable created date",
-            })
-            continue
-
-        status = _clean(pick_field(raw, fields["status"]))
-        classification = _clean(pick_field(raw, fields["classification"]))
-        manual_verdict = _clean(pick_field(raw, fields["manual_verdict"]))
-        updated_at = parse_datetime(pick_field(raw, fields["updated_at"]))
-        closed_at = parse_datetime(pick_field(raw, fields["closed_at"]))
-        remediated_at = parse_datetime(pick_field(raw, fields["remediated_at"]))
-        state_changed_at = parse_datetime(pick_field(raw, fields["state_changed_at"]))
-
-        is_closed_state = in_set(status, closed_statuses)
-        is_resolved_state = in_set(status, resolved_statuses)
-
-        verdict_values = {
-            "status": status,
-            "classification": classification,
-            "manual_verdict": manual_verdict,
-        }
-        is_false_positive = any(in_set(verdict_values.get(name), fp_values)
-                                for name in fp_fields)
-
-        severity = _clean(pick_field(raw, fields["severity"]))
-        is_p1p2 = in_set(severity, p1p2_values)
-
-        # The spec's COALESCE(closed_at, updated_at); remediated_at sits between
-        # them because a remediation time is a closure time when one is recorded.
-        effective_closed_at = closed_at or remediated_at or updated_at
-
-        tta_minutes, tta_suspect = _duration(raw, fields, "tta_text", "tta_minutes", cap)
-        analyze_minutes, analyze_suspect = _duration(
-            raw, fields, "analyze_text", "analyze_minutes", cap)
-        remediate_minutes, remediate_suspect = _duration(
-            raw, fields, "remediate_text", "remediate_minutes", cap)
-        suspect_durations += sum([tta_suspect, analyze_suspect, remediate_suspect])
-
-        # A zero duration with no matching timestamp is a default, not a
-        # measurement, so it must not pull an average down to zero.
-        if remediate_minutes == 0 and remediated_at is None:
-            remediate_minutes = None
-
-        # --- the three bases, exactly as specified -------------------------
-        in_open = (
-            created_at <= end
-            and (closed_at is None or closed_at > end)
-            and not (closed_at is None and is_closed_state)
-        )
-        in_new = start <= created_at <= end
-        in_closed = (
-            is_closed_state
-            and effective_closed_at is not None
-            and start <= effective_closed_at <= end
-        )
-
-        dwell_from = state_changed_at or updated_at or created_at
-
-        normalized.append({
-            "_sources": set(),
-            "tracking_id": _clean(pick_field(raw, fields["tracking_id"])) or "row-{}".format(index),
-            "alert_uid": _clean(pick_field(raw, fields["alert_uid"])),
-            "title": _clean(pick_field(raw, fields["title"])),
-            "assigned_to": _clean(pick_field(raw, fields["assigned_to"])),
-            "severity": severity,
-            "status": status,
-            "type": _clean(pick_field(raw, fields["type"])),
-            "record_hierarchy": hierarchy,
-            "classification": classification,
-            "manual_verdict": manual_verdict,
-            "threat_type": _clean(pick_field(raw, fields["threat_type"])),
-            "alert_categories": _clean(pick_field(raw, fields["alert_categories"])),
-            "mitre_technique": _clean(pick_field(raw, fields["mitre_technique"])),
-            "escalated": is_truthy(pick_field(raw, fields["escalated"])),
-
-            "created_at": to_iso(created_at),
-            "updated_at": to_iso(updated_at),
-            "closed_at": to_iso(closed_at),
-            "remediated_at": to_iso(remediated_at),
-            "effective_closed_at": to_iso(effective_closed_at),
-
-            "is_closed_state": is_closed_state,
-            "is_resolved_state": is_resolved_state,
-            "is_false_positive": is_false_positive,
-            "is_p1p2": is_p1p2,
-            "is_truly_resolved": is_resolved_state and not is_false_positive,
-
-            # What the date conditions say. Final membership is decided in
-            # main(), which prefers a dedicated search when one was supplied.
-            "cond_open": in_open,
-            "cond_new": in_new,
-            "cond_closed": in_closed,
-
-            # Measured at the period end so a re-run of a past day describes
-            # that day rather than today.
-            "age_days": round((end - created_at).total_seconds() / 86400.0, 4),
-            "days_since_update": (None if updated_at is None
-                                  else round((end - updated_at).total_seconds() / 86400.0, 4)),
-            "duration_hours": (None if effective_closed_at is None else
-                               round((effective_closed_at - created_at).total_seconds() / 3600.0, 4)),
-            "dwell_hours": round((end - dwell_from).total_seconds() / 3600.0, 4),
-            "same_day_close": (effective_closed_at is not None
-                               and effective_closed_at.date() == created_at.date()),
-
-            "tta_minutes": tta_minutes,
-            "analyze_minutes": analyze_minutes,
-            "remediate_minutes": remediate_minutes,
-
-            # Reserved. These resolve to None until the CIM record carries them;
-            # Script B reports the metrics that need them as unavailable.
-            "reassign_count": _to_number(pick_field(raw, fields["reassign_count"])),
-            "risk_score": _to_number(pick_field(raw, fields["risk_score"])),
-            "sla_breached": (None if pick_field(raw, fields["sla_breached"]) is None
-                             else is_truthy(pick_field(raw, fields["sla_breached"]))),
-        })
-
-    return normalized, skipped, suspect_durations, filtered_out
-
-
-def _to_number(value):
-    if value in (None, ""):
-        return None
-    try:
-        return float(value)
-    except (TypeError, ValueError):
-        return None
-
-
-def build_coverage(records, skipped, suspect_durations, filtered_out, scope,
-                   searched_bases=None, disagreement=None, rows_fetched=None):
-    """Which canonical fields actually carried data, so Script B can be honest.
-
-    A field that resolved on no record at all is reported missing, and every
-    metric that depends on it is stored as null instead of a misleading zero.
-    """
-    tracked = [
-        "created_at", "updated_at", "closed_at", "remediated_at", "status",
-        "assigned_to", "severity", "classification", "manual_verdict",
-        "record_hierarchy", "type", "threat_type", "mitre_technique",
-        "tta_minutes", "analyze_minutes", "remediate_minutes",
-        "reassign_count", "risk_score", "sla_breached", "state_changed_at",
-    ]
-    present, missing = [], []
-    for field in tracked:
-        if any(record.get(field) not in (None, "") for record in records):
-            present.append(field)
-        else:
-            missing.append(field)
-    searched_bases = set(searched_bases or [])
-    open_ok, closed_ok, note = SCOPE_RULES[scope]
-    # A base with its own search is measurable regardless of the day scope,
-    # because that search answered the question directly.
-    if "open" in searched_bases:
-        open_ok = True
-    if "closed" in searched_bases:
-        closed_ok = True
-    if searched_bases:
-        note = "{}; dedicated search for: {}".format(note, ", ".join(sorted(searched_bases)))
+def read_options(context):
+    """The configuration inputs every one of the three scripts shares."""
     return {
-        "scope": {
-            "data_scope": scope,
-            "open_base_measurable": open_ok,
-            "closed_base_measurable": closed_ok,
-            "searched_bases": sorted(searched_bases),
-            "base_disagreement": disagreement or {},
-            "note": note,
-        },
-        "fields_present": present,
-        "fields_missing": missing,
-        # rows_fetched counts every row the searches returned; the gap to
-        # records_used is the overlap between them, which is expected when a
-        # record is both open and new.
-        "rows_fetched": (len(records) + len(skipped) + filtered_out
-                         if rows_fetched is None else rows_fetched),
-        "records_used": len(records),
-        "duplicates_merged": (0 if rows_fetched is None else
-                              max(rows_fetched - len(skipped) - filtered_out
-                                  - len(records), 0)),
-        "records_skipped": len(skipped),
-        "records_filtered_by_hierarchy": filtered_out,
-        "suspect_durations_dropped": suspect_durations,
-        "skipped_detail": skipped[:50],
-    }
-
-
-def main(context=None):
-    start, end, snapshot = resolve_day_window(
-        get_input(context, "period_mode", "today"),
-        get_input(context, "snapshot_date"),
-        get_input(context, "now"),
-    )
-
-    options = {
-        "start": start,
-        "end": end,
         "field_map": get_input(context, "field_map"),
         "closed_statuses": get_input(context, "closed_statuses"),
         "resolved_statuses": get_input(context, "resolved_statuses"),
@@ -881,58 +674,140 @@ def main(context=None):
         "suspect_minutes_over": get_input(context, "suspect_minutes_over"),
     }
 
-    buckets = [
-        ("generic", _as_list(get_input(context, "records", []))),
-        ("open", _as_list(get_input(context, "open_records",
-                                    get_input(context, "backlog_records", [])))),
-        ("new", _as_list(get_input(context, "new_records", []))),
-        ("closed", _as_list(get_input(context, "closed_records", []))),
-    ]
 
-    records, skipped, suspect, filtered = [], [], 0, 0
-    rows_fetched = sum(len(rows) for _, rows in buckets)
-    for source, rows in buckets:
-        if not rows:
-            continue
-        part, part_skipped, part_suspect, part_filtered = normalize(rows, options)
-        for record in part:
-            record["_sources"].add(source)
-        records.extend(part)
-        skipped.extend(part_skipped)
-        suspect += part_suspect
-        filtered += part_filtered
+def field_coverage(records, needed):
+    """Which reserved fields carried data, so a metric can say why it is null."""
+    return {name: any(r.get(name) not in (None, "") for r in records)
+            for name in needed}
 
-    records = dedupe(records)
-    searched_bases = {source for source, rows in buckets
-                      if rows and source != "generic"}
 
-    disagreement = assign_bases(
-        records, searched_bases, get_input(context, "base_assignment", "auto"))
+def blocked(reason):
+    """A metric that cannot be computed: null plus the reason, never 0."""
+    return {"value": None, "status": "unavailable", "reason": reason}
 
-    scope = resolve_scope(get_input(context, "data_scope", "auto"),
-                          "open" in searched_bases, records, start)
-    coverage = build_coverage(records, skipped, suspect, filtered, scope,
-                              searched_bases, disagreement, rows_fetched)
 
-    # sets are not JSON-safe, and the playbook has to carry this payload
-    for record in records:
-        record["_sources"] = sorted(record["_sources"])
+def ok(value, note=None):
+    return {"value": value, "status": "proxy" if note else "ok", "reason": note}
 
-    return {
-        "records": records,
-        "period": {
-            "start": to_iso(start),
-            "end": to_iso(end),
-            "date": snapshot,
-            "key": snapshot,
-            "mode": get_input(context, "period_mode", "today"),
-        },
-        "coverage": coverage,
-        "summary": {
-            "total": len(records),
-            "open": sum(1 for r in records if r["in_open"]),
-            "new": sum(1 for r in records if r["in_new"]),
-            "closed": sum(1 for r in records if r["in_closed"]),
-            "has_records": bool(records),
-        },
+
+def flatten_metrics(metrics, prefix=""):
+    """Flatten the catalog into the scalars an application field can hold.
+
+    A value metric expands to Avg/Sum/P90/Count. A metric that is unavailable
+    still writes every one of its columns as null, so the application's field
+    set does not change shape on the day a source field is added.
+    """
+    flat = {}
+    for key in sorted(metrics):
+        entry = metrics[key]
+        value = entry.get("value")
+        if entry.get("kind", "").startswith("value"):
+            parts = value if isinstance(value, dict) else {}
+            for part in ("avg", "sum", "p90", "count"):
+                flat["{}{}_{}".format(prefix, key, part)] = parts.get(part)
+        else:
+            flat[prefix + key] = value
+    return flat
+
+# ==========================================================================
+# end shared helper block
+# ==========================================================================
+
+
+def compute_new_metrics(records):
+    """The six new-base metrics, plus two the CIM columns support for free."""
+    have = field_coverage(records, ["sla_breached", "tta_minutes"])
+
+    metrics = {
+        "new_inc_total": dict(ok(len(records)), kind="count"),
+        "new_inc_p1p2_count": dict(
+            ok(sum(1 for r in records if r.get("is_p1p2"))), kind="count"),
+        "new_inc_escalated_count": dict(
+            ok(sum(1 for r in records if r.get("escalated"))), kind="count"),
     }
+
+    # The spec derives MTTA from the first assigned/state_changed history event.
+    # The CIM record already stores the measured value, so this is the same
+    # number taken directly rather than reconstructed.
+    if have["tta_minutes"]:
+        acknowledged = [r["tta_minutes"] for r in records
+                        if r.get("tta_minutes") is not None]
+        note = "from the Time to Acknowledge column, not a history lookup"
+        metrics["mtta_hours"] = dict(
+            ok(stats([m / 60.0 for m in acknowledged]), note), kind="value_hours")
+        metrics["mtta_minutes"] = dict(ok(stats(acknowledged), note), kind="value")
+        metrics["new_inc_acknowledged_count"] = dict(
+            ok(len(acknowledged)), kind="count")
+    else:
+        why = "no acknowledge time on any record in this batch"
+        metrics["mtta_hours"] = dict(blocked(why), kind="value_hours")
+        metrics["mtta_minutes"] = dict(blocked(why), kind="value")
+        metrics["new_inc_acknowledged_count"] = dict(blocked(why), kind="count")
+
+    if have["sla_breached"]:
+        breached = [r for r in records if r.get("sla_breached")]
+        tracked = [r for r in records if r.get("sla_breached") is not None]
+        metrics["sla_breached_count"] = dict(ok(len(breached)), kind="count")
+        metrics["sla_breach_rate"] = dict(
+            ok(pct(len(breached), len(tracked))), kind="rate")
+        metrics["sla_compliance_rate"] = dict(
+            ok(pct(len(tracked) - len(breached), len(tracked))), kind="rate")
+    else:
+        why = "needs an SLA breached field on the CIM record"
+        metrics["sla_breached_count"] = dict(blocked(why), kind="count")
+        metrics["sla_breach_rate"] = dict(blocked(why), kind="rate")
+        metrics["sla_compliance_rate"] = dict(blocked(why), kind="rate")
+    return metrics
+
+
+def main(context=None):
+    start, end, snapshot = resolve_day_window(
+        get_input(context, "period_mode", "full_today"),
+        get_input(context, "snapshot_date"),
+        get_input(context, "now"),
+    )
+
+    records, skipped, suspect, filtered = normalize_records(
+        get_input(context, "records", []), read_options(context), end)
+
+    # The search should return records created inside the day. Anything else
+    # means its filter and the day window disagree, which is worth reporting
+    # rather than quietly counting.
+    inside, outside = [], []
+    for record in records:
+        created = parse_datetime(record.get("created_at"))
+        (inside if created is not None and start <= created <= end
+         else outside).append(record)
+
+    metrics = compute_new_metrics(inside)
+    result = flatten_metrics(metrics)
+    result.update({
+        "snapshot_date": snapshot,
+        "period_start": to_iso(start),
+        "period_end": to_iso(end),
+        "metrics": metrics,
+        "breakdowns": {
+            "new_by_severity": count_by(inside, "severity", order=PRIORITY_ORDER),
+            "new_by_threat_type": count_by(inside, "threat_type", top=10),
+            "new_by_mitre_technique": count_by(inside, "mitre_technique", top=10),
+            "new_by_owner": count_by(inside, "assigned_to", top=10),
+        },
+        "coverage": {
+            "rows_fetched": len(records) + len(skipped) + filtered,
+            "records_used": len(inside),
+            "records_skipped": len(skipped),
+            "records_filtered_by_hierarchy": filtered,
+            "records_outside_window": len(outside),
+            "suspect_durations_dropped": suspect,
+            "unavailable": {k: m["reason"] for k, m in metrics.items()
+                            if m["status"] == "unavailable"},
+            "proxied": {k: m["reason"] for k, m in metrics.items()
+                        if m["status"] == "proxy"},
+            "skipped_detail": skipped[:50],
+            "warning": ("{} record(s) fell outside {} - {}: the search filter and "
+                        "the day window disagree".format(
+                            len(outside), to_iso(start), to_iso(end))
+                        if outside else None),
+        },
+    })
+    return result
