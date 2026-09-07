@@ -1,0 +1,384 @@
+"""Shared helpers for the Swimlane Turbine KPI playbook scripts.
+
+Everything here is standard-library only so it can be pasted into a Turbine
+Python action (or imported locally for testing) without any package install.
+
+The Turbine sandbox gives each Python action a ``context`` object.  The exact
+shape differs between Turbine versions, so :func:`get_inputs` accepts every
+form we have seen:
+
+    * ``context.inputs``            -> dict
+    * ``context["inputs"]``         -> dict
+    * ``context.get("inputs")``     -> dict
+    * a bare dict that *is* the inputs
+
+That means the same script body works in the playbook and on a laptop.
+"""
+
+from __future__ import annotations
+
+import re
+from datetime import date, datetime, timedelta, timezone
+
+UTC = timezone.utc
+
+# --------------------------------------------------------------------------
+# Defaults.  Override any of these from the playbook action inputs so the
+# scripts survive a CIM field rename without a code change.
+# --------------------------------------------------------------------------
+
+#: Canonical field -> candidate keys on the raw CIM record, first match wins.
+#: Keys are matched case-insensitively and dotted paths are supported.
+DEFAULT_FIELD_MAP = {
+    "id": ["id", "recordId", "record_id", "Id"],
+    "tracking_id": ["trackingId", "tracking_id", "trackingFull", "Tracking Id"],
+    "title": ["title", "name", "summary", "shortDescription", "Alert Name"],
+    "status": ["status", "state", "Status", "incidentStatus"],
+    "priority": ["priority", "Priority", "urgency"],
+    "severity": ["severity", "Severity", "criticality"],
+    "created": ["created", "createdDate", "createdAt", "opened_at", "Created"],
+    "closed": ["closed", "closedDate", "resolvedDate", "resolved_at", "Closed"],
+    "updated": ["modified", "updated", "updatedAt", "lastModified"],
+    "assignee": ["assignee", "assignedTo", "owner", "Assigned To"],
+    "team": ["team", "group", "assignmentGroup", "queue"],
+    "category": ["category", "type", "incidentType", "classification"],
+    "source": ["source", "sourceSystem", "detectionSource", "sensor"],
+    "sla_due": ["slaDue", "sla_due", "dueDate", "sla_target"],
+}
+
+#: Status values that mean "this record is no longer in the backlog".
+DEFAULT_CLOSED_STATUSES = [
+    "closed",
+    "resolved",
+    "completed",
+    "done",
+    "cancelled",
+    "canceled",
+    "false positive",
+    "false-positive",
+    "closed - benign",
+    "benign",
+    "duplicate",
+    "rejected",
+]
+
+#: Aging buckets for the open backlog, in whole days. ``None`` = no upper bound.
+DEFAULT_AGE_BUCKETS = [
+    ("0-1d", 0, 1),
+    ("2-3d", 2, 3),
+    ("4-7d", 4, 7),
+    ("8-14d", 8, 14),
+    ("15-30d", 15, 30),
+    ("30d+", 31, None),
+]
+
+#: Priority ordering used to sort breakdowns; anything unknown sorts last.
+PRIORITY_ORDER = ["critical", "high", "medium", "low", "informational", "info"]
+
+_EPOCH = datetime(1970, 1, 1, tzinfo=UTC)
+
+_DATE_FORMATS = [
+    "%Y-%m-%dT%H:%M:%S.%f%z",
+    "%Y-%m-%dT%H:%M:%S%z",
+    "%Y-%m-%dT%H:%M:%S.%f",
+    "%Y-%m-%dT%H:%M:%S",
+    "%Y-%m-%d %H:%M:%S.%f",
+    "%Y-%m-%d %H:%M:%S",
+    "%Y-%m-%d %H:%M",
+    "%Y-%m-%d",
+    "%m/%d/%Y %H:%M:%S",
+    "%m/%d/%Y %H:%M",
+    "%m/%d/%Y",
+    "%d/%m/%Y %H:%M:%S",
+]
+
+
+# --------------------------------------------------------------------------
+# Turbine context plumbing
+# --------------------------------------------------------------------------
+
+def get_inputs(context):
+    """Return the action's input dict regardless of Turbine context shape."""
+    if context is None:
+        return {}
+    inputs = getattr(context, "inputs", None)
+    if isinstance(inputs, dict):
+        return inputs
+    if isinstance(context, dict):
+        if isinstance(context.get("inputs"), dict):
+            return context["inputs"]
+        return context
+    getter = getattr(context, "get", None)
+    if callable(getter):
+        try:
+            found = getter("inputs")
+        except TypeError:
+            found = None
+        if isinstance(found, dict):
+            return found
+    return {}
+
+
+def get_input(context, name, default=None):
+    """Read one input by name, falling back to ``default`` when blank."""
+    value = get_inputs(context).get(name, default)
+    if value is None or value == "" or value == []:
+        return default
+    return value
+
+
+# --------------------------------------------------------------------------
+# Field resolution
+# --------------------------------------------------------------------------
+
+def _flatten(record, prefix="", out=None):
+    """Flatten nested dicts into ``a.b.c`` keys so dotted paths resolve."""
+    if out is None:
+        out = {}
+    if not isinstance(record, dict):
+        return out
+    for key, value in record.items():
+        path = "{}.{}".format(prefix, key) if prefix else str(key)
+        out[path] = value
+        if isinstance(value, dict):
+            _flatten(value, path, out)
+    return out
+
+
+def pick_field(record, candidates, default=None):
+    """First non-empty value among ``candidates`` (case-insensitive keys)."""
+    if not isinstance(record, dict):
+        return default
+    flat = _flatten(record)
+    lowered = {k.lower(): v for k, v in flat.items()}
+    for candidate in candidates or []:
+        for key in (candidate, str(candidate).lower()):
+            if key in flat and flat[key] not in (None, ""):
+                return flat[key]
+            if key in lowered and lowered[key] not in (None, ""):
+                return lowered[key]
+    return default
+
+
+def merge_field_map(overrides):
+    """Layer playbook overrides on top of :data:`DEFAULT_FIELD_MAP`.
+
+    An override may be a single key or a list of candidate keys; either way the
+    override is tried *before* the built-in candidates so nothing is lost.
+    """
+    merged = {k: list(v) for k, v in DEFAULT_FIELD_MAP.items()}
+    for field, candidates in (overrides or {}).items():
+        if isinstance(candidates, str):
+            candidates = [candidates]
+        existing = merged.get(field, [])
+        merged[field] = list(candidates) + [c for c in existing if c not in candidates]
+    return merged
+
+
+# --------------------------------------------------------------------------
+# Dates
+# --------------------------------------------------------------------------
+
+def parse_datetime(value):
+    """Parse the many date shapes CIM records carry. Returns UTC-aware or None."""
+    if value is None or value == "":
+        return None
+    if isinstance(value, datetime):
+        return value if value.tzinfo else value.replace(tzinfo=UTC)
+    if isinstance(value, date):
+        return datetime(value.year, value.month, value.day, tzinfo=UTC)
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        seconds = float(value)
+        if seconds > 1e11:  # milliseconds
+            seconds /= 1000.0
+        try:
+            return datetime.fromtimestamp(seconds, tz=UTC)
+        except (OverflowError, OSError, ValueError):
+            return None
+
+    text = str(value).strip()
+    if not text:
+        return None
+    if re.fullmatch(r"-?\d{10,13}", text):
+        return parse_datetime(int(text))
+
+    normalized = text.replace("Z", "+00:00").replace("z", "+00:00")
+    try:
+        parsed = datetime.fromisoformat(normalized)
+        return parsed if parsed.tzinfo else parsed.replace(tzinfo=UTC)
+    except ValueError:
+        pass
+
+    # Trim fractional seconds longer than 6 digits, which %f rejects.
+    trimmed = re.sub(r"(\.\d{6})\d+", r"\1", text)
+    for fmt in _DATE_FORMATS:
+        try:
+            parsed = datetime.strptime(trimmed, fmt)
+            return parsed if parsed.tzinfo else parsed.replace(tzinfo=UTC)
+        except ValueError:
+            continue
+    return None
+
+
+def to_iso(value):
+    """UTC ISO-8601 string, or None. Safe to hand straight to a Swimlane field."""
+    parsed = parse_datetime(value)
+    if parsed is None:
+        return None
+    return parsed.astimezone(UTC).isoformat().replace("+00:00", "Z")
+
+
+def day_key(value):
+    """``YYYY-MM-DD`` bucket key for a timestamp."""
+    parsed = parse_datetime(value)
+    return None if parsed is None else parsed.astimezone(UTC).date().isoformat()
+
+
+def start_of_day(value):
+    parsed = parse_datetime(value)
+    if parsed is None:
+        return None
+    return parsed.astimezone(UTC).replace(hour=0, minute=0, second=0, microsecond=0)
+
+
+def end_of_day(value):
+    start = start_of_day(value)
+    return None if start is None else start + timedelta(days=1) - timedelta(microseconds=1)
+
+
+def resolve_period(period, period_start, period_end, now=None):
+    """Turn a named period (``last_7_days`` etc.) into a concrete UTC window.
+
+    Explicit ``period_start`` / ``period_end`` inputs always win, so the same
+    playbook can run on a schedule or be re-run for a specific month.
+    """
+    now = parse_datetime(now) or datetime.now(UTC)
+    explicit_start = parse_datetime(period_start)
+    explicit_end = parse_datetime(period_end)
+    if explicit_start and explicit_end:
+        return explicit_start, explicit_end
+
+    name = (period or "last_30_days").strip().lower().replace("-", "_").replace(" ", "_")
+    today_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
+    end = now
+
+    if name in ("today", "day", "last_24_hours", "24h"):
+        start = today_start if name in ("today", "day") else now - timedelta(hours=24)
+    elif name in ("yesterday",):
+        start = today_start - timedelta(days=1)
+        end = today_start - timedelta(microseconds=1)
+    elif name in ("last_7_days", "7d", "week", "this_week"):
+        start = today_start - timedelta(days=6)
+    elif name in ("last_14_days", "14d"):
+        start = today_start - timedelta(days=13)
+    elif name in ("last_30_days", "30d", "month"):
+        start = today_start - timedelta(days=29)
+    elif name in ("last_90_days", "90d", "quarter"):
+        start = today_start - timedelta(days=89)
+    elif name in ("month_to_date", "mtd"):
+        start = today_start.replace(day=1)
+    elif name in ("last_month", "previous_month"):
+        first_this_month = today_start.replace(day=1)
+        end = first_this_month - timedelta(microseconds=1)
+        start = (first_this_month - timedelta(days=1)).replace(day=1)
+    elif name in ("year_to_date", "ytd"):
+        start = today_start.replace(month=1, day=1)
+    else:
+        start = today_start - timedelta(days=29)
+
+    return (explicit_start or start), (explicit_end or end)
+
+
+def day_span(start, end, max_days=400):
+    """Inclusive list of ``date`` objects from ``start`` to ``end``."""
+    first = start_of_day(start)
+    last = start_of_day(end)
+    if first is None or last is None or last < first:
+        return []
+    total = (last - first).days + 1
+    total = min(total, max_days)
+    return [(first + timedelta(days=offset)).date() for offset in range(total)]
+
+
+def hours_between(start, end):
+    a, b = parse_datetime(start), parse_datetime(end)
+    if a is None or b is None:
+        return None
+    return (b - a).total_seconds() / 3600.0
+
+
+# --------------------------------------------------------------------------
+# Small stats helpers (no numpy in the Turbine sandbox)
+# --------------------------------------------------------------------------
+
+def mean(values):
+    clean = [v for v in values if v is not None]
+    return round(sum(clean) / len(clean), 2) if clean else None
+
+
+def median(values):
+    clean = sorted(v for v in values if v is not None)
+    if not clean:
+        return None
+    mid = len(clean) // 2
+    if len(clean) % 2:
+        return round(clean[mid], 2)
+    return round((clean[mid - 1] + clean[mid]) / 2.0, 2)
+
+
+def percentile(values, pct):
+    """Nearest-rank percentile; ``pct`` is 0-100."""
+    clean = sorted(v for v in values if v is not None)
+    if not clean:
+        return None
+    rank = max(1, min(len(clean), int(round((pct / 100.0) * len(clean) + 0.5))))
+    return round(clean[rank - 1], 2)
+
+
+def pct(part, whole, digits=1):
+    """Percentage of ``part`` in ``whole``; 0.0 when ``whole`` is 0."""
+    if not whole:
+        return 0.0
+    return round((float(part) / float(whole)) * 100.0, digits)
+
+
+def count_by(records, key, top=None, order=None):
+    """Count records by a canonical field, biggest first.
+
+    ``order`` gives a preferred ordering (e.g. :data:`PRIORITY_ORDER`); values
+    outside it keep their count-descending position after the ordered ones.
+    """
+    counts = {}
+    for record in records:
+        value = record.get(key) or "Unassigned"
+        counts[str(value)] = counts.get(str(value), 0) + 1
+
+    def sort_key(item):
+        label, total = item
+        if order:
+            try:
+                return (0, order.index(label.strip().lower()), -total, label)
+            except ValueError:
+                return (1, 0, -total, label)
+        return (0, 0, -total, label)
+
+    ranked = sorted(counts.items(), key=sort_key)
+    if top:
+        ranked = ranked[:top]
+    return [{"label": label, "count": total} for label, total in ranked]
+
+
+def bucket_ages(ages_days, buckets=None):
+    """Distribute ages (in days) into the configured aging buckets."""
+    buckets = buckets or DEFAULT_AGE_BUCKETS
+    result = [{"label": label, "count": 0, "min_days": low, "max_days": high}
+              for label, low, high in buckets]
+    for age in ages_days:
+        if age is None:
+            continue
+        whole_days = int(age)
+        for index, (_, low, high) in enumerate(buckets):
+            if whole_days >= low and (high is None or whole_days <= high):
+                result[index]["count"] += 1
+                break
+    return result
