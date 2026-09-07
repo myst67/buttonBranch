@@ -59,6 +59,17 @@ tenant reads:
 The scripts also avoid syntax newer than Python 3.6, so an older sandbox still
 compiles them.
 
+**To find out which convention your tenant uses**, paste
+`probe_turbine_contract.py` into a Python action, add one input named `records`
+bound to any search result, and run it once. Whatever the run shows tells you
+the answer: the `probe_via` value names the channel that reached the output
+panel, `inputs_read_from` names how inputs arrived, and `first_record_keys`
+lists the exact column names your CIM search returns, which is what the field
+map has to match. It is a one-off check, not part of the playbook.
+
+`OUTPUT_FIELDS.md` lists every output key each script returns, with the field
+type that fits.
+
 If an action still produces nothing, work through these in order:
 
 1. **Are the outputs declared?** Some tenants only surface output keys that are
