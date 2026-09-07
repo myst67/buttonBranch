@@ -73,34 +73,49 @@ but Turbine does not need it.
 
 ---
 
-## Mapping outputs to fields
+## What the output contains
 
-Every metric is a top-level output, so the mapping is direct. No JSON to unpack.
-
-```
-A.open_inc_total              ->  Open Inc Total
-A.open_more_than_five_days    ->  Open More Than Five Days
-A.age_open_inc_avg            ->  Avg Backlog Age Days
-B.new_inc_total               ->  New Inc Total
-B.mtta_hours_avg              ->  MTTA Hours
-C.closed_inc_total            ->  Closed Inc Total
-C.fp_rate                     ->  FP Rate %
-C.mttr_hours_avg              ->  MTTR Hours
-```
-
-A metric defined as a value rather than a count expands to four outputs, so one
-stored metric answers both "sum" and "mean" without a re-run:
+Metrics only. Every metric is a top-level scalar, and `breakdown` holds the
+composition of each one.
 
 ```
-age_open_inc_avg    age_open_inc_sum    age_open_inc_p90    age_open_inc_count
+open_inc_total            3
+open_more_than_five_days   2
+age_open_inc_avg        6.54
+...
+breakdown: {
+  open_inc_total:            { severity: [...], status: [...], assigned_to: [...] },
+  open_more_than_five_days:  { severity: [...], status: [...] },
+  age_open_inc:              { severity: [{label, count, avg, sum}, ...] },
+}
 ```
 
-`_count` is how many records carried the value, which is not the size of the
-base when a column is sparsely filled.
+A count metric breaks down as counts per dimension, and those counts always sum
+to the metric itself. A value metric breaks down as the count and mean per
+dimension. The dimensions are severity, status, owner, classification, threat
+type and record type; any the records do not carry is left out rather than
+filling the output with "Unassigned" rows.
 
-Each script also returns `metrics` (the same values with status and reason),
-`coverage`, `breakdowns` and, from Script A, `oldest_open`. Those are objects,
-useful for a JSON field or a dashboard, not for a numeric field.
+The scalars are what an application field maps to:
+
+```
+open_inc_total     ->  Open Inc Total
+age_open_inc_avg   ->  Avg Backlog Age Days
+new_inc_total      ->  New Inc Total
+mttr_hours_avg     ->  MTTR Hours
+```
+
+A value metric expands to `_avg`, `_sum`, `_p90` and `_count`, so one metric
+answers both "sum" and "mean" without a re-run. `_count` is how many records
+carried the value, which is not the size of the base when a column is sparsely
+filled.
+
+A metric that cannot be computed is null and carries no breakdown, so it never
+appears as a fabricated zero.
+
+Diagnostics are off by default. Set `include_coverage` to true to add a
+`coverage` object with row counts, skipped records and the reason each blocked
+metric is unavailable.
 
 ---
 

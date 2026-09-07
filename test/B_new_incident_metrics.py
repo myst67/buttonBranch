@@ -829,54 +829,133 @@ def run_on_import(entry):
             scope["action_error"] = {"message": message}
         return emit_outputs({"error": message, "snapshot_date": None})
 
+
+#: Dimensions every metric is broken down by, when the records carry them.
+BREAKDOWN_DIMENSIONS = ["severity", "status", "assigned_to", "classification",
+                        "threat_type", "type"]
+
+
+def count_breakdown(records, dims=None, top=10):
+    """Compose a count metric: the same records sliced by each dimension.
+
+    A dimension no record carries is left out rather than filling the output
+    with rows that all read "Unassigned".
+    """
+    result = {}
+    for dim in (dims or BREAKDOWN_DIMENSIONS):
+        if not any(r.get(dim) for r in records):
+            continue
+        result[dim] = count_by(records, dim, top=top)
+    return result
+
+
+def value_breakdown(records, field, dims=None, top=10):
+    """Compose a value metric: count and mean of ``field`` per dimension."""
+    result = {}
+    for dim in (dims or BREAKDOWN_DIMENSIONS):
+        if not any(r.get(dim) for r in records):
+            continue
+        grouped = {}
+        for record in records:
+            if record.get(field) is None:
+                continue
+            grouped.setdefault(str(record.get(dim) or "Unassigned"), []).append(
+                float(record[field]))
+        rows = [{"label": label, "count": len(values),
+                 "avg": round(sum(values) / len(values), 2),
+                 "sum": round(sum(values), 2)}
+                for label, values in grouped.items()]
+        rows.sort(key=lambda row: (-row["count"], row["label"]))
+        if rows:
+            result[dim] = rows[:top]
+    return result
+
+
+def metric_entry(value, kind, records=None, field=None, note=None, reason=None):
+    """One metric: its value, and the breakdown of what went into it."""
+    entry = {
+        "value": value,
+        "kind": kind,
+        "status": "unavailable" if reason else ("proxy" if note else "ok"),
+        "reason": reason or note,
+    }
+    if reason is None and records is not None:
+        entry["breakdown"] = (value_breakdown(records, field) if field
+                              else count_breakdown(records))
+    else:
+        entry["breakdown"] = {}
+    return entry
+
+
+def shape_output(metrics, extras=None, coverage=None, include_coverage=False):
+    """Metrics only: a flat scalar per metric, plus a breakdown for each.
+
+    The scalars are what an application field maps to. ``breakdown`` holds the
+    composition of every metric, keyed by metric name, so one output answers
+    both "what is the number" and "what is it made of".
+    """
+    result = flatten_metrics(metrics)
+    result["breakdown"] = {key: entry["breakdown"] for key, entry in metrics.items()
+                           if entry.get("breakdown")}
+    for key, value in (extras or {}).items():
+        result[key] = value
+    if include_coverage and coverage is not None:
+        result["coverage"] = coverage
+    return result
+
 # ==========================================================================
 # end shared helper block
 # ==========================================================================
 
 
 def compute_new_metrics(records):
-    """The six new-base metrics, plus two the CIM columns support for free."""
+    """The new-base metrics, each carrying the breakdown of what it counted."""
     have = field_coverage(records, ["sla_breached", "tta_minutes"])
+    metrics = {}
 
-    metrics = {
-        "new_inc_total": dict(ok(len(records)), kind="count"),
-        "new_inc_p1p2_count": dict(
-            ok(sum(1 for r in records if r.get("is_p1p2"))), kind="count"),
-        "new_inc_escalated_count": dict(
-            ok(sum(1 for r in records if r.get("escalated"))), kind="count"),
-    }
+    for key, predicate in [
+        ("new_inc_total", lambda r: True),
+        ("new_inc_p1p2_count", lambda r: r.get("is_p1p2")),
+        ("new_inc_escalated_count", lambda r: r.get("escalated")),
+    ]:
+        subset = [r for r in records if predicate(r)]
+        metrics[key] = metric_entry(len(subset), "count", subset)
 
     # The spec derives MTTA from the first assigned/state_changed history event.
-    # The CIM record already stores the measured value, so this is the same
-    # number taken directly rather than reconstructed.
+    # The CIM record stores the measured value, so this is that number taken
+    # directly rather than reconstructed.
     if have["tta_minutes"]:
-        acknowledged = [r["tta_minutes"] for r in records
-                        if r.get("tta_minutes") is not None]
-        note = "from the Time to Acknowledge column, not a history lookup"
-        metrics["mtta_hours"] = dict(
-            ok(stats([m / 60.0 for m in acknowledged]), note), kind="value_hours")
-        metrics["mtta_minutes"] = dict(ok(stats(acknowledged), note), kind="value")
-        metrics["new_inc_acknowledged_count"] = dict(
-            ok(len(acknowledged)), kind="count")
+        acknowledged = [r for r in records if r.get("tta_minutes") is not None]
+        note = "from the acknowledge-minutes column, not a history lookup"
+        metrics["mtta_minutes"] = metric_entry(
+            stats([r["tta_minutes"] for r in acknowledged]), "value",
+            acknowledged, "tta_minutes", note)
+        metrics["mtta_hours"] = metric_entry(
+            stats([r["tta_minutes"] / 60.0 for r in acknowledged]), "value_hours",
+            acknowledged, "tta_minutes", note)
+        metrics["new_inc_acknowledged_count"] = metric_entry(
+            len(acknowledged), "count", acknowledged)
     else:
         why = "no acknowledge time on any record in this batch"
-        metrics["mtta_hours"] = dict(blocked(why), kind="value_hours")
-        metrics["mtta_minutes"] = dict(blocked(why), kind="value")
-        metrics["new_inc_acknowledged_count"] = dict(blocked(why), kind="count")
+        metrics["mtta_minutes"] = metric_entry(None, "value", reason=why)
+        metrics["mtta_hours"] = metric_entry(None, "value_hours", reason=why)
+        metrics["new_inc_acknowledged_count"] = metric_entry(None, "count", reason=why)
 
     if have["sla_breached"]:
-        breached = [r for r in records if r.get("sla_breached")]
         tracked = [r for r in records if r.get("sla_breached") is not None]
-        metrics["sla_breached_count"] = dict(ok(len(breached)), kind="count")
-        metrics["sla_breach_rate"] = dict(
-            ok(pct(len(breached), len(tracked))), kind="rate")
-        metrics["sla_compliance_rate"] = dict(
-            ok(pct(len(tracked) - len(breached), len(tracked))), kind="rate")
+        breached = [r for r in tracked if r.get("sla_breached")]
+        metrics["sla_breached_count"] = metric_entry(len(breached), "count", breached)
+        metrics["sla_breach_rate"] = metric_entry(
+            pct(len(breached), len(tracked)), "rate", breached)
+        metrics["sla_compliance_rate"] = metric_entry(
+            pct(len(tracked) - len(breached), len(tracked)), "rate",
+            [r for r in tracked if not r.get("sla_breached")])
     else:
         why = "needs an SLA breached field on the CIM record"
-        metrics["sla_breached_count"] = dict(blocked(why), kind="count")
-        metrics["sla_breach_rate"] = dict(blocked(why), kind="rate")
-        metrics["sla_compliance_rate"] = dict(blocked(why), kind="rate")
+        for key, kind in [("sla_breached_count", "count"),
+                          ("sla_breach_rate", "rate"),
+                          ("sla_compliance_rate", "rate")]:
+            metrics[key] = metric_entry(None, kind, reason=why)
     return metrics
 
 
@@ -900,37 +979,26 @@ def main(context=None):
          else outside).append(record)
 
     metrics = compute_new_metrics(inside)
-    result = flatten_metrics(metrics)
-    result.update({
-        "snapshot_date": snapshot,
-        "period_start": to_iso(start),
-        "period_end": to_iso(end),
-        "metrics": metrics,
-        "breakdowns": {
-            "new_by_severity": count_by(inside, "severity", order=PRIORITY_ORDER),
-            "new_by_threat_type": count_by(inside, "threat_type", top=10),
-            "new_by_mitre_technique": count_by(inside, "mitre_technique", top=10),
-            "new_by_owner": count_by(inside, "assigned_to", top=10),
-        },
-        "coverage": {
-            "rows_fetched": len(records) + len(skipped) + filtered,
-            "records_used": len(inside),
-            "records_skipped": len(skipped),
-            "records_filtered_by_hierarchy": filtered,
-            "records_outside_window": len(outside),
-            "suspect_durations_dropped": suspect,
-            "unavailable": {k: m["reason"] for k, m in metrics.items()
-                            if m["status"] == "unavailable"},
-            "proxied": {k: m["reason"] for k, m in metrics.items()
-                        if m["status"] == "proxy"},
-            "skipped_detail": skipped[:50],
-            "warning": ("{} record(s) fell outside {} - {}: the search filter and "
-                        "the day window disagree".format(
-                            len(outside), to_iso(start), to_iso(end))
-                        if outside else None),
-        },
-    })
-    return result
+
+    coverage = {
+        "rows_fetched": len(records) + len(skipped) + filtered,
+        "records_used": len(inside),
+        "records_skipped": len(skipped),
+        "records_filtered_by_hierarchy": filtered,
+        "records_outside_window": len(outside),
+        "suspect_durations_dropped": suspect,
+        "unavailable": {k: m["reason"] for k, m in metrics.items()
+                        if m["status"] == "unavailable"},
+        "proxied": {k: m["reason"] for k, m in metrics.items()
+                    if m["status"] == "proxy"},
+        "skipped_detail": skipped[:50],
+        "warning": ("{} record(s) fell outside {} - {}: the search filter and the "
+                    "day window disagree".format(len(outside), to_iso(start),
+                                                 to_iso(end))
+                    if outside else None),
+    }
+    return shape_output(metrics, {"snapshot_date": snapshot}, coverage,
+                        is_truthy(get_input(context, "include_coverage", False)))
 
 
 # ======================================================================

@@ -838,70 +838,148 @@ def run_on_import(entry):
             scope["action_error"] = {"message": message}
         return emit_outputs({"error": message, "snapshot_date": None})
 
+
+#: Dimensions every metric is broken down by, when the records carry them.
+BREAKDOWN_DIMENSIONS = ["severity", "status", "assigned_to", "classification",
+                        "threat_type", "type"]
+
+
+def count_breakdown(records, dims=None, top=10):
+    """Compose a count metric: the same records sliced by each dimension.
+
+    A dimension no record carries is left out rather than filling the output
+    with rows that all read "Unassigned".
+    """
+    result = {}
+    for dim in (dims or BREAKDOWN_DIMENSIONS):
+        if not any(r.get(dim) for r in records):
+            continue
+        result[dim] = count_by(records, dim, top=top)
+    return result
+
+
+def value_breakdown(records, field, dims=None, top=10):
+    """Compose a value metric: count and mean of ``field`` per dimension."""
+    result = {}
+    for dim in (dims or BREAKDOWN_DIMENSIONS):
+        if not any(r.get(dim) for r in records):
+            continue
+        grouped = {}
+        for record in records:
+            if record.get(field) is None:
+                continue
+            grouped.setdefault(str(record.get(dim) or "Unassigned"), []).append(
+                float(record[field]))
+        rows = [{"label": label, "count": len(values),
+                 "avg": round(sum(values) / len(values), 2),
+                 "sum": round(sum(values), 2)}
+                for label, values in grouped.items()]
+        rows.sort(key=lambda row: (-row["count"], row["label"]))
+        if rows:
+            result[dim] = rows[:top]
+    return result
+
+
+def metric_entry(value, kind, records=None, field=None, note=None, reason=None):
+    """One metric: its value, and the breakdown of what went into it."""
+    entry = {
+        "value": value,
+        "kind": kind,
+        "status": "unavailable" if reason else ("proxy" if note else "ok"),
+        "reason": reason or note,
+    }
+    if reason is None and records is not None:
+        entry["breakdown"] = (value_breakdown(records, field) if field
+                              else count_breakdown(records))
+    else:
+        entry["breakdown"] = {}
+    return entry
+
+
+def shape_output(metrics, extras=None, coverage=None, include_coverage=False):
+    """Metrics only: a flat scalar per metric, plus a breakdown for each.
+
+    The scalars are what an application field maps to. ``breakdown`` holds the
+    composition of every metric, keyed by metric name, so one output answers
+    both "what is the number" and "what is it made of".
+    """
+    result = flatten_metrics(metrics)
+    result["breakdown"] = {key: entry["breakdown"] for key, entry in metrics.items()
+                           if entry.get("breakdown")}
+    for key, value in (extras or {}).items():
+        result[key] = value
+    if include_coverage and coverage is not None:
+        result["coverage"] = coverage
+    return result
+
 # ==========================================================================
 # end shared helper block
 # ==========================================================================
 
 
 def compute_closed_metrics(records):
-    """The sixteen closed-base metrics."""
+    """The closed-base metrics, each carrying the breakdown of what it counted."""
     have = field_coverage(records, ["reassign_count", "risk_score"])
 
     false_positives = [r for r in records if r.get("is_false_positive")]
     high_risk_fp = [r for r in false_positives if r.get("is_p1p2")]
     resolved = [r for r in records if r.get("is_truly_resolved")]
     same_day = [r for r in records if r.get("same_day_close")]
+    not_resolved = [r for r in records if not r.get("is_resolved_state")]
 
     metrics = {
-        "closed_inc_total": dict(ok(len(records)), kind="count"),
-        "closed_inc_not_resolved": dict(
-            ok(sum(1 for r in records if not r.get("is_resolved_state"))),
-            kind="count"),
-        "closed_inc_same_day_open": dict(ok(len(same_day)), kind="count"),
-        "false_positive_count": dict(ok(len(false_positives)), kind="count"),
-        "false_positive_high_risk_count": dict(ok(len(high_risk_fp)), kind="count"),
-        "true_positive_count": dict(ok(len(resolved)), kind="count"),
+        "closed_inc_total": metric_entry(len(records), "count", records),
+        "closed_inc_not_resolved": metric_entry(len(not_resolved), "count", not_resolved),
+        "closed_inc_same_day_open": metric_entry(len(same_day), "count", same_day),
+        "false_positive_count": metric_entry(len(false_positives), "count", false_positives),
+        "false_positive_high_risk_count": metric_entry(
+            len(high_risk_fp), "count", high_risk_fp),
+        "true_positive_count": metric_entry(len(resolved), "count", resolved),
 
-        "duration_closed_inc": dict(
-            ok(stats([r.get("duration_hours") for r in records])),
-            kind="value_hours"),
-        "duration_false_positive_closed_inc": dict(
-            ok(stats([r.get("duration_hours") for r in false_positives])),
-            kind="value_hours"),
+        "duration_closed_inc": metric_entry(
+            stats([r.get("duration_hours") for r in records]), "value_hours",
+            records, "duration_hours"),
+        "duration_false_positive_closed_inc": metric_entry(
+            stats([r.get("duration_hours") for r in false_positives]), "value_hours",
+            false_positives, "duration_hours"),
         # MTTR counts only the genuinely resolved, so a wave of false positives
         # closed in minutes cannot flatter it.
-        "mttr_hours": dict(
-            ok(stats([r.get("duration_hours") for r in resolved])),
-            kind="value_hours"),
+        "mttr_hours": metric_entry(
+            stats([r.get("duration_hours") for r in resolved]), "value_hours",
+            resolved, "duration_hours"),
 
-        "fp_rate": dict(ok(pct(len(false_positives), len(records))), kind="rate"),
-        "same_day_close_rate": dict(ok(pct(len(same_day), len(records))), kind="rate"),
-        "true_positive_rate": dict(ok(pct(len(resolved), len(records))), kind="rate"),
+        "fp_rate": metric_entry(
+            pct(len(false_positives), len(records)), "rate", false_positives),
+        "same_day_close_rate": metric_entry(
+            pct(len(same_day), len(records)), "rate", same_day),
+        "true_positive_rate": metric_entry(
+            pct(len(resolved), len(records)), "rate", resolved),
     }
 
     if have["reassign_count"]:
         first_attempt = [r for r in records if r.get("reassign_count") == 0]
-        metrics["closed_inc_on_first_attempt"] = dict(
-            ok(len(first_attempt)), kind="count")
-        metrics["first_close_rate"] = dict(
-            ok(pct(len(first_attempt), len(records))), kind="rate")
+        metrics["closed_inc_on_first_attempt"] = metric_entry(
+            len(first_attempt), "count", first_attempt)
+        metrics["first_close_rate"] = metric_entry(
+            pct(len(first_attempt), len(records)), "rate", first_attempt)
     else:
         why = "needs a reassign count field on the CIM record"
-        metrics["closed_inc_on_first_attempt"] = dict(blocked(why), kind="count")
-        metrics["first_close_rate"] = dict(blocked(why), kind="rate")
+        metrics["closed_inc_on_first_attempt"] = metric_entry(None, "count", reason=why)
+        metrics["first_close_rate"] = metric_entry(None, "rate", reason=why)
 
     if have["risk_score"]:
-        metrics["risk_score_closed_inc"] = dict(
-            ok(stats([r.get("risk_score") for r in records])), kind="value")
-        metrics["risk_score_false_positive_inc"] = dict(
-            ok(stats([r.get("risk_score") for r in false_positives])), kind="value")
-        metrics["risk_score_high_risk_fp_inc"] = dict(
-            ok(stats([r.get("risk_score") for r in high_risk_fp])), kind="value")
+        for key, subset in [("risk_score_closed_inc", records),
+                            ("risk_score_false_positive_inc", false_positives),
+                            ("risk_score_high_risk_fp_inc", high_risk_fp)]:
+            scored = [r for r in subset if r.get("risk_score") is not None]
+            metrics[key] = metric_entry(
+                stats([r.get("risk_score") for r in scored]), "value",
+                scored, "risk_score")
     else:
         why = "needs a risk score field on the CIM record"
         for key in ("risk_score_closed_inc", "risk_score_false_positive_inc",
                     "risk_score_high_risk_fp_inc"):
-            metrics[key] = dict(blocked(why), kind="value")
+            metrics[key] = metric_entry(None, "value", reason=why)
     return metrics
 
 
@@ -926,40 +1004,29 @@ def main(context=None):
          else outside).append(record)
 
     metrics = compute_closed_metrics(inside)
-    result = flatten_metrics(metrics)
-    result.update({
-        "snapshot_date": snapshot,
-        "period_start": to_iso(start),
-        "period_end": to_iso(end),
-        "metrics": metrics,
-        "breakdowns": {
-            "closed_by_severity": count_by(inside, "severity", order=PRIORITY_ORDER),
-            "closed_by_status": count_by(inside, "status", top=10),
-            "closed_by_owner": count_by(inside, "assigned_to", top=10),
-            "closed_by_classification": count_by(inside, "classification", top=10),
-        },
-        "coverage": {
-            "rows_fetched": len(records) + len(skipped) + filtered,
-            "records_used": len(inside),
-            "records_skipped": len(skipped),
-            "records_filtered_by_hierarchy": filtered,
-            "records_outside_window": len(outside),
-            "records_not_in_closed_status": len(still_open),
-            "suspect_durations_dropped": suspect,
-            "unavailable": {k: m["reason"] for k, m in metrics.items()
-                            if m["status"] == "unavailable"},
-            "proxied": {k: m["reason"] for k, m in metrics.items()
-                        if m["status"] == "proxy"},
-            "skipped_detail": skipped[:50],
-            "warning": ("; ".join(filter(None, [
-                ("{} record(s) closed outside {} - {}".format(
-                    len(outside), to_iso(start), to_iso(end)) if outside else None),
-                ("{} record(s) are not in a closed status".format(len(still_open))
-                 if still_open else None),
-            ])) or None),
-        },
-    })
-    return result
+
+    coverage = {
+        "rows_fetched": len(records) + len(skipped) + filtered,
+        "records_used": len(inside),
+        "records_skipped": len(skipped),
+        "records_filtered_by_hierarchy": filtered,
+        "records_outside_window": len(outside),
+        "records_not_in_closed_status": len(still_open),
+        "suspect_durations_dropped": suspect,
+        "unavailable": {k: m["reason"] for k, m in metrics.items()
+                        if m["status"] == "unavailable"},
+        "proxied": {k: m["reason"] for k, m in metrics.items()
+                    if m["status"] == "proxy"},
+        "skipped_detail": skipped[:50],
+        "warning": ("; ".join(filter(None, [
+            ("{} record(s) closed outside {} - {}".format(
+                len(outside), to_iso(start), to_iso(end)) if outside else None),
+            ("{} record(s) are not in a closed status".format(len(still_open))
+             if still_open else None),
+        ])) or None),
+    }
+    return shape_output(metrics, {"snapshot_date": snapshot}, coverage,
+                        is_truthy(get_input(context, "include_coverage", False)))
 
 
 # ======================================================================
