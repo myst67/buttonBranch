@@ -35,8 +35,6 @@ fp_rate, same_day_close_rate, first_close_rate, true_positive_rate
 snapshot_date, coverage, breakdowns, metrics
 """
 
-from __future__ import annotations
-
 import json
 import re
 from datetime import date, datetime, timedelta, timezone
@@ -718,6 +716,48 @@ def flatten_metrics(metrics, prefix=""):
             flat[prefix + key] = value
     return flat
 
+
+def emit_outputs(result):
+    """Publish the result under every convention a Turbine Python action uses.
+
+    Different Turbine versions collect an action's output differently: some take
+    what main() returns, some read a module-level ``outputs``, some read
+    ``context.outputs``. Writing to all of them means the script produces its
+    values whichever contract this tenant uses.
+    """
+    scope = globals()
+    scope["outputs"] = result
+    scope["output"] = result
+    scope["result"] = result
+
+    ctx = scope.get("context")
+    if ctx is not None:
+        existing = getattr(ctx, "outputs", None)
+        if isinstance(existing, dict):
+            existing.update(result)
+        else:
+            try:
+                ctx.outputs = result
+            except (AttributeError, TypeError):
+                pass
+        if isinstance(ctx, dict):
+            ctx.setdefault("outputs", {})
+            if isinstance(ctx["outputs"], dict):
+                ctx["outputs"].update(result)
+    return result
+
+
+def run_if_sandbox_supplied_context(entry):
+    """Call ``entry`` when the sandbox executes this file with a context in scope.
+
+    A tenant that calls main() itself is unaffected: this simply runs first and
+    publishes the same values.
+    """
+    scope = globals()
+    if "context" in scope:
+        return emit_outputs(entry(scope["context"]))
+    return None
+
 # ==========================================================================
 # end shared helper block
 # ==========================================================================
@@ -840,3 +880,19 @@ def main(context=None):
         },
     })
     return result
+
+
+# ======================================================================
+# Entry point
+# ======================================================================
+# Turbine collects an action's output differently across versions, so the
+# result is published every way: returned from main(), exposed as a
+# module-level `outputs`, and written to context.outputs. The aliases cover
+# tenants that expect a differently named entry function.
+
+script = main
+run = main
+execute = main
+handler = main
+
+run_if_sandbox_supplied_context(main)

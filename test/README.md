@@ -44,6 +44,36 @@ links them, and it is optional: pass Script B's `new_inc_total` and Script C's
 
 ---
 
+## If the action shows no output
+
+Turbine collects a Python action's result differently across versions, so each
+script publishes its values four ways and one of them will be the one your
+tenant reads:
+
+* returned from `main(context)`
+* exposed as a module-level `outputs`
+* written to `context.outputs`
+* aliased as `script`, `run`, `execute` and `handler` for tenants that expect a
+  differently named entry function
+
+The scripts also avoid syntax newer than Python 3.6, so an older sandbox still
+compiles them.
+
+If an action still produces nothing, work through these in order:
+
+1. **Are the outputs declared?** Some tenants only surface output keys that are
+   declared in the action's output schema. Add the keys you want to map, for
+   example `open_inc_total`, spelled exactly as the script returns them.
+2. **Is the input named `records`?** The script reads its inputs by name. An
+   input bound correctly but named `record` or `results` reads as empty, and the
+   script returns zeros rather than failing.
+3. **Check `coverage` in the result.** `rows_fetched` tells you whether the
+   records arrived at all. Zero means the binding, not the script.
+4. **Was the whole file pasted?** Each script is one file, helper block included.
+   Pasting only the part below the helper banner leaves the helpers undefined.
+
+---
+
 ## Mapping outputs to fields
 
 Every metric is a top-level output, so the mapping is direct. No JSON to unpack.
