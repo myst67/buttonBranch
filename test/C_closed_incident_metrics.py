@@ -153,8 +153,16 @@ _DURATION_MINUTES = {
 # Turbine context plumbing
 # --------------------------------------------------------------------------
 
-def get_inputs(context):
-    """Return the action's input dict regardless of Turbine context shape."""
+def get_inputs(context=None):
+    """Return the action's inputs.
+
+    Turbine's Script action injects a global ``action_inputs`` dict, which is
+    the documented contract and is checked first. The context shapes below are
+    kept so the same file still runs under a test harness or a custom action.
+    """
+    scope = globals()
+    if isinstance(scope.get("action_inputs"), dict):
+        return scope["action_inputs"]
     if context is None:
         return {}
     inputs = getattr(context, "inputs", None)
@@ -740,14 +748,20 @@ def flatten_metrics(metrics, prefix=""):
 
 
 def emit_outputs(result):
-    """Publish the result under every convention a Turbine Python action uses.
+    """Publish the result the way Turbine's Script action collects it.
 
-    Different Turbine versions collect an action's output differently: some take
-    what main() returns, some read a module-level ``outputs``, some read
-    ``context.outputs``. Writing to all of them means the script produces its
-    values whichever contract this tenant uses.
+    ``action_outputs`` is the documented sink: the sandbox may pre-create it, so
+    it is updated in place when it already exists and assigned otherwise. The
+    other names are written too, harmlessly, so the same file still reports its
+    values under a test harness.
     """
     scope = globals()
+    existing = scope.get("action_outputs")
+    if isinstance(existing, dict):
+        existing.update(result)
+    else:
+        scope["action_outputs"] = dict(result)
+
     scope["outputs"] = result
     scope["output"] = result
     scope["result"] = result
@@ -790,6 +804,8 @@ def resolve_context():
     produces its full set of keys instead of nothing.
     """
     scope = globals()
+    if isinstance(scope.get("action_inputs"), dict):
+        return {"inputs": scope["action_inputs"]}
     if "context" in scope and scope["context"] is not None:
         return scope["context"]
     if isinstance(scope.get("inputs"), dict):
@@ -812,11 +828,15 @@ def run_on_import(entry):
     """
     try:
         return emit_outputs(entry(resolve_context()))
-    except Exception as error:  # never fail silently: report it as the result
-        return emit_outputs({
-            "error": "{}: {}".format(type(error).__name__, error),
-            "snapshot_date": None,
-        })
+    except Exception as error:  # never fail silently
+        message = "{}: {}".format(type(error).__name__, error)
+        scope = globals()
+        existing_error = scope.get("action_error")
+        if isinstance(existing_error, dict):
+            existing_error["message"] = message
+        else:
+            scope["action_error"] = {"message": message}
+        return emit_outputs({"error": message, "snapshot_date": None})
 
 # ==========================================================================
 # end shared helper block
@@ -945,12 +965,10 @@ def main(context=None):
 # ======================================================================
 # Entry point
 # ======================================================================
-# The action runs as soon as this file is executed, whether or not the sandbox
-# supplies a `context`, and the result is published every way Turbine might
-# collect it: returned from main(), exposed as a module-level `outputs`, and
-# written to context.outputs. The aliases cover tenants that expect a
-# differently named entry function. With no inputs bound the counts come back
-# as zero, which still proves the script ran.
+# Turbine's Script action injects `action_inputs`, collects `action_outputs`,
+# and fails the action through `action_error`. This runs on execution, reads
+# `action_inputs`, and writes every metric into `action_outputs`. main() stays
+# available so the file can also be driven directly by a test harness.
 
 script = main
 run = main

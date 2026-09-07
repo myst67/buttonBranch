@@ -44,53 +44,32 @@ links them, and it is optional: pass Script B's `new_inc_total` and Script C's
 
 ---
 
-## If the action shows no output
+## How the scripts talk to Turbine
 
-The scripts **run as soon as the file is executed**, whether or not the sandbox
-supplies a `context`. That matters for diagnosis: with no inputs bound the counts
-come back as zero, so a result full of zeros proves the script ran and points at
-the input binding, while a result of `{}` means the file never executed.
+Turbine's Script native action injects three globals, and the scripts use them:
 
-Inputs are found three ways: a `context` object or dict, a bare `inputs` dict, or
-each input injected as its own global variable.
+| Global | Role |
+| --- | --- |
+| `action_inputs` | dict of the inputs configured on the action |
+| `action_outputs` | dict the action collects as its result |
+| `action_error` | populate it to fail the action with that message |
 
-The result is then published four ways, one of which your tenant will read:
+Each script runs as soon as the action executes, reads `action_inputs`, and
+writes every metric into `action_outputs`. If it raises, the message goes to
+`action_error` rather than disappearing.
 
-* returned from `main(context)`
-* exposed as a module-level `outputs`
-* written to `context.outputs`
-* aliased as `script`, `run`, `execute` and `handler` for tenants that expect a
-  differently named entry function
+`main(context)` is still defined so the file can be driven by a test harness,
+but Turbine does not need it.
 
-The scripts also avoid syntax newer than Python 3.6, so an older sandbox still
-compiles them.
+### If the result is still empty
 
-**To find out which convention your tenant uses**, paste
-`probe_turbine_contract.py` into a Python action, add one input named `records`
-bound to any search result, and run it once. Whatever the run shows tells you
-the answer: the `probe_via` value names the channel that reached the output
-panel, `inputs_read_from` names how inputs arrived, and `first_record_keys`
-lists the exact column names your CIM search returns, which is what the field
-map has to match. It is a one-off check, not part of the playbook.
-
-`OUTPUT_FIELDS.md` lists every output key each script returns, with the field
-type that fits.
-
-If an action still produces nothing, work through these in order:
-
-1. **Does the action's Inputs panel show `{}`?** Then nothing was passed in.
-   Define an input named `records` on the action and map it to the search
-   result. This is separate from the output problem and has to be fixed too.
-2. **Are the outputs declared?** Some tenants only surface output keys that are
-   declared in the action's output schema. Add the keys you want to map, for
-   example `open_inc_total`, spelled exactly as the script returns them.
-3. **Is the input named `records`?** The script reads its inputs by name. An
-   input bound correctly but named `record` or `results` reads as empty, and the
-   script returns zeros rather than failing.
-4. **Check `coverage` in the result.** `rows_fetched` tells you whether the
-   records arrived at all. Zero means the binding, not the script.
-5. **Was the whole file pasted?** Each script is one file, helper block included.
-   Pasting only the part below the helper banner leaves the helpers undefined.
+* **`{}` with no error** means the file did not execute. Confirm the whole file
+  was pasted, helper block included.
+* **Zeros everywhere** means it ran but got no records. Check the input is named
+  exactly `records`, and read `coverage.rows_fetched`.
+* **`coverage.records_skipped` above zero** means records arrived but had no
+  usable created date. `coverage.skipped_detail` says why, and `field_map` fixes
+  it without editing the script.
 
 ---
 
