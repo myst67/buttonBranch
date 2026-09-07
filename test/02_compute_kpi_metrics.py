@@ -1,0 +1,366 @@
+"""Playbook action 2 of 5 - turn canonical records into KPI numbers.
+
+This is the arithmetic behind the dashboard tiles: the open backlog, what came
+in, what went out, how old the backlog is, how fast we close, and how the work
+splits by priority, severity, team and source.
+
+The backlog identity always holds:  opening + new - closed == closing.
+Action 4 asserts it, so a mapping mistake shows up as a failed check rather
+than a quietly wrong tile.
+
+Turbine inputs
+--------------
+records        output of action 1
+period         output of action 1
+now            optional ISO "as of" time
+age_buckets    optional [[label, min_days, max_days_or_null], ...]
+top_n          how many rows to keep in each breakdown table (default 10)
+
+Turbine outputs
+---------------
+metrics        the full KPI block
+
+Self-contained: the shared helpers this action needs are inlined below,
+so the whole file pastes into one Turbine Python action.
+"""
+
+from __future__ import annotations
+
+import re
+from datetime import date, datetime, timezone
+
+# ======================================================================
+# Helpers
+# ======================================================================
+
+UTC = timezone.utc
+
+#: Aging buckets for the open backlog, in whole days. ``None`` = no upper bound.
+DEFAULT_AGE_BUCKETS = [
+    ("0-1d", 0, 1),
+    ("2-3d", 2, 3),
+    ("4-7d", 4, 7),
+    ("8-14d", 8, 14),
+    ("15-30d", 15, 30),
+    ("30d+", 31, None),
+]
+
+#: Priority ordering used to sort breakdowns; anything unknown sorts last.
+PRIORITY_ORDER = ["critical", "high", "medium", "low", "informational", "info"]
+
+_DATE_FORMATS = [
+    "%Y-%m-%dT%H:%M:%S.%f%z",
+    "%Y-%m-%dT%H:%M:%S%z",
+    "%Y-%m-%dT%H:%M:%S.%f",
+    "%Y-%m-%dT%H:%M:%S",
+    "%Y-%m-%d %H:%M:%S.%f",
+    "%Y-%m-%d %H:%M:%S",
+    "%Y-%m-%d %H:%M",
+    "%Y-%m-%d",
+    "%m/%d/%Y %H:%M:%S",
+    "%m/%d/%Y %H:%M",
+    "%m/%d/%Y",
+    "%d/%m/%Y %H:%M:%S",
+]
+
+def get_inputs(context):
+    """Return the action's input dict regardless of Turbine context shape."""
+    if context is None:
+        return {}
+    inputs = getattr(context, "inputs", None)
+    if isinstance(inputs, dict):
+        return inputs
+    if isinstance(context, dict):
+        if isinstance(context.get("inputs"), dict):
+            return context["inputs"]
+        return context
+    getter = getattr(context, "get", None)
+    if callable(getter):
+        try:
+            found = getter("inputs")
+        except TypeError:
+            found = None
+        if isinstance(found, dict):
+            return found
+    return {}
+
+def get_input(context, name, default=None):
+    """Read one input by name, falling back to ``default`` when blank."""
+    value = get_inputs(context).get(name, default)
+    if value is None or value == "" or value == []:
+        return default
+    return value
+
+def parse_datetime(value):
+    """Parse the many date shapes CIM records carry. Returns UTC-aware or None."""
+    if value is None or value == "":
+        return None
+    if isinstance(value, datetime):
+        return value if value.tzinfo else value.replace(tzinfo=UTC)
+    if isinstance(value, date):
+        return datetime(value.year, value.month, value.day, tzinfo=UTC)
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        seconds = float(value)
+        if seconds > 1e11:  # milliseconds
+            seconds /= 1000.0
+        try:
+            return datetime.fromtimestamp(seconds, tz=UTC)
+        except (OverflowError, OSError, ValueError):
+            return None
+
+    text = str(value).strip()
+    if not text:
+        return None
+    if re.fullmatch(r"-?\d{10,13}", text):
+        return parse_datetime(int(text))
+
+    normalized = text.replace("Z", "+00:00").replace("z", "+00:00")
+    try:
+        parsed = datetime.fromisoformat(normalized)
+        return parsed if parsed.tzinfo else parsed.replace(tzinfo=UTC)
+    except ValueError:
+        pass
+
+    # Trim fractional seconds longer than 6 digits, which %f rejects.
+    trimmed = re.sub(r"(\.\d{6})\d+", r"\1", text)
+    for fmt in _DATE_FORMATS:
+        try:
+            parsed = datetime.strptime(trimmed, fmt)
+            return parsed if parsed.tzinfo else parsed.replace(tzinfo=UTC)
+        except ValueError:
+            continue
+    return None
+
+def to_iso(value):
+    """UTC ISO-8601 string, or None. Safe to hand straight to a Swimlane field."""
+    parsed = parse_datetime(value)
+    if parsed is None:
+        return None
+    return parsed.astimezone(UTC).isoformat().replace("+00:00", "Z")
+
+def mean(values):
+    clean = [v for v in values if v is not None]
+    return round(sum(clean) / len(clean), 2) if clean else None
+
+def median(values):
+    clean = sorted(v for v in values if v is not None)
+    if not clean:
+        return None
+    mid = len(clean) // 2
+    if len(clean) % 2:
+        return round(clean[mid], 2)
+    return round((clean[mid - 1] + clean[mid]) / 2.0, 2)
+
+def percentile(values, pct):
+    """Nearest-rank percentile; ``pct`` is 0-100."""
+    clean = sorted(v for v in values if v is not None)
+    if not clean:
+        return None
+    rank = max(1, min(len(clean), int(round((pct / 100.0) * len(clean) + 0.5))))
+    return round(clean[rank - 1], 2)
+
+def pct(part, whole, digits=1):
+    """Percentage of ``part`` in ``whole``; 0.0 when ``whole`` is 0."""
+    if not whole:
+        return 0.0
+    return round((float(part) / float(whole)) * 100.0, digits)
+
+def count_by(records, key, top=None, order=None):
+    """Count records by a canonical field, biggest first.
+
+    ``order`` gives a preferred ordering (e.g. :data:`PRIORITY_ORDER`); values
+    outside it keep their count-descending position after the ordered ones.
+    """
+    counts = {}
+    for record in records:
+        value = record.get(key) or "Unassigned"
+        counts[str(value)] = counts.get(str(value), 0) + 1
+
+    def sort_key(item):
+        label, total = item
+        if order:
+            try:
+                return (0, order.index(label.strip().lower()), -total, label)
+            except ValueError:
+                return (1, 0, -total, label)
+        return (0, 0, -total, label)
+
+    ranked = sorted(counts.items(), key=sort_key)
+    if top:
+        ranked = ranked[:top]
+    return [{"label": label, "count": total} for label, total in ranked]
+
+def bucket_ages(ages_days, buckets=None):
+    """Distribute ages (in days) into the configured aging buckets."""
+    buckets = buckets or DEFAULT_AGE_BUCKETS
+    result = [{"label": label, "count": 0, "min_days": low, "max_days": high}
+              for label, low, high in buckets]
+    for age in ages_days:
+        if age is None:
+            continue
+        whole_days = int(age)
+        for index, (_, low, high) in enumerate(buckets):
+            if whole_days >= low and (high is None or whole_days <= high):
+                result[index]["count"] += 1
+                break
+    return result
+
+# ======================================================================
+# Action
+# ======================================================================
+
+def _within(value, start, end):
+    moment = parse_datetime(value)
+    return moment is not None and start <= moment <= end
+
+def _open_at(record, moment):
+    """Was this record in the backlog at ``moment``?"""
+    created = parse_datetime(record.get("created"))
+    if created is None or created > moment:
+        return False
+    closed = parse_datetime(record.get("closed"))
+    return closed is None or closed > moment
+
+def _coerce_buckets(raw):
+    if not raw:
+        return DEFAULT_AGE_BUCKETS
+    buckets = []
+    for entry in raw:
+        if isinstance(entry, dict):
+            buckets.append((entry.get("label"), entry.get("min_days", 0), entry.get("max_days")))
+        elif isinstance(entry, (list, tuple)) and len(entry) >= 3:
+            buckets.append((entry[0], entry[1], entry[2]))
+    return buckets or DEFAULT_AGE_BUCKETS
+
+def compute_metrics(records, period_start, period_end, now=None, age_buckets=None, top_n=10):
+    start = parse_datetime(period_start)
+    end = parse_datetime(period_end)
+    as_of = parse_datetime(now) or datetime.now(UTC)
+    records = records or []
+
+    new_records = [r for r in records if _within(r.get("created"), start, end)]
+    closed_records = [r for r in records if _within(r.get("closed"), start, end)]
+    open_now = [r for r in records if r.get("is_open")]
+
+    # Backlog at both ends of the window, so the tile can show the delta.
+    opening_backlog = [r for r in records if _open_at(r, start)]
+    closing_backlog = [r for r in records if _open_at(r, end)]
+
+    # Ages are measured on the *closing* backlog at the period end, so that a
+    # re-run of a past period describes that period and not today.
+    backlog_ages = {}
+    for record in closing_backlog:
+        created = parse_datetime(record.get("created"))
+        if created is not None:
+            backlog_ages[id(record)] = round(
+                (end - created).total_seconds() / 86400.0, 2)
+    ages = list(backlog_ages.values())
+
+    resolution_hours = [r.get("resolution_hours") for r in closed_records
+                        if r.get("resolution_hours") is not None]
+
+    sla_tracked = [r for r in records if r.get("sla_due_set")]
+    sla_breached_open = [r for r in open_now if r.get("sla_breached")]
+    sla_breached_closed = [r for r in closed_records if r.get("sla_breached")]
+    sla_met = len(sla_tracked) - len(
+        [r for r in sla_tracked if r.get("sla_breached")]
+    )
+
+    aged_over_30 = [age for age in ages if age >= 30]
+    untouched = [r for r in closing_backlog
+                 if r.get("assignee") in (None, "", "Unassigned")]
+
+    return {
+        "generated_at": to_iso(as_of),
+        "period": {"start": to_iso(start), "end": to_iso(end)},
+
+        # --- headline tiles -------------------------------------------------
+        "totals": {
+            "new": len(new_records),
+            "closed": len(closed_records),
+            "open_backlog": len(closing_backlog),
+            "opening_backlog": len(opening_backlog),
+            "net_change": len(new_records) - len(closed_records),
+            "open_now": len(open_now),
+            "total_records": len(records),
+        },
+        "rates": {
+            # >100% means we closed more than arrived, i.e. the backlog shrank.
+            "closure_rate_pct": pct(len(closed_records), len(new_records)),
+            "backlog_change_pct": pct(
+                len(closing_backlog) - len(opening_backlog), len(opening_backlog) or 1
+            ),
+            "unassigned_pct": pct(len(untouched), len(closing_backlog)),
+            "aged_over_30d_pct": pct(len(aged_over_30), len(closing_backlog)),
+        },
+
+        # --- how old is the backlog ----------------------------------------
+        "backlog_age": {
+            "buckets": bucket_ages(ages, _coerce_buckets(age_buckets)),
+            "avg_days": mean(ages),
+            "median_days": median(ages),
+            "p90_days": percentile(ages, 90),
+            "oldest_days": round(max(ages), 2) if ages else None,
+            "over_30d": len(aged_over_30),
+            "unassigned": len(untouched),
+        },
+
+        # --- how fast do we close ------------------------------------------
+        "resolution": {
+            "sample_size": len(resolution_hours),
+            "mttr_hours": mean(resolution_hours),
+            "median_hours": median(resolution_hours),
+            "p90_hours": percentile(resolution_hours, 90),
+            "fastest_hours": round(min(resolution_hours), 2) if resolution_hours else None,
+            "slowest_hours": round(max(resolution_hours), 2) if resolution_hours else None,
+        },
+
+        # --- SLA -------------------------------------------------------------
+        "sla": {
+            "tracked": len(sla_tracked),
+            "met": max(sla_met, 0),
+            "breached_open": len(sla_breached_open),
+            "breached_closed": len(sla_breached_closed),
+            "compliance_pct": pct(max(sla_met, 0), len(sla_tracked)),
+        },
+
+        # --- breakdowns for the dashboard tables/charts ----------------------
+        "breakdowns": {
+            "open_by_priority": count_by(closing_backlog, "priority", order=PRIORITY_ORDER),
+            "open_by_severity": count_by(closing_backlog, "severity", order=PRIORITY_ORDER),
+            "open_by_status": count_by(closing_backlog, "status"),
+            "open_by_team": count_by(closing_backlog, "team", top=top_n),
+            "open_by_assignee": count_by(closing_backlog, "assignee", top=top_n),
+            "new_by_source": count_by(new_records, "source", top=top_n),
+            "new_by_category": count_by(new_records, "category", top=top_n),
+            "closed_by_team": count_by(closed_records, "team", top=top_n),
+        },
+
+        # --- worklist for the "oldest open" table ---------------------------
+        "oldest_open": [
+            {
+                "id": r.get("id"),
+                "tracking_id": r.get("tracking_id"),
+                "title": r.get("title"),
+                "priority": r.get("priority"),
+                "assignee": r.get("assignee"),
+                "age_days": backlog_ages.get(id(r)),
+                "created": r.get("created"),
+            }
+            for r in sorted(closing_backlog,
+                            key=lambda r: backlog_ages.get(id(r)) or 0,
+                            reverse=True)[:top_n]
+        ],
+    }
+
+def main(context=None):
+    period = get_input(context, "period", {}) or {}
+    metrics = compute_metrics(
+        get_input(context, "records", []),
+        period.get("start"),
+        period.get("end"),
+        get_input(context, "now"),
+        get_input(context, "age_buckets"),
+        int(get_input(context, "top_n", 10)),
+    )
+    return {"metrics": metrics}
