@@ -842,158 +842,59 @@ def run_on_import(entry):
             scope["action_error"] = {"message": message}
         return emit_outputs({"error": message, "snapshot_date": None})
 
-
-#: Dimensions every metric is broken down by, when the records carry them.
-BREAKDOWN_DIMENSIONS = ["severity", "status", "assigned_to", "classification",
-                        "threat_type", "type"]
-
-
-def count_breakdown(records, dims=None, top=10):
-    """Compose a count metric: the same records sliced by each dimension.
-
-    A dimension no record carries is left out rather than filling the output
-    with rows that all read "Unassigned".
-    """
-    result = {}
-    for dim in (dims or BREAKDOWN_DIMENSIONS):
-        if not any(r.get(dim) for r in records):
-            continue
-        result[dim] = count_by(records, dim, top=top)
-    return result
-
-
-def value_breakdown(records, field, dims=None, top=10):
-    """Compose a value metric: count and mean of ``field`` per dimension."""
-    result = {}
-    for dim in (dims or BREAKDOWN_DIMENSIONS):
-        if not any(r.get(dim) for r in records):
-            continue
-        grouped = {}
-        for record in records:
-            if record.get(field) is None:
-                continue
-            grouped.setdefault(str(record.get(dim) or "Unassigned"), []).append(
-                float(record[field]))
-        rows = [{"label": label, "count": len(values),
-                 "avg": round(sum(values) / len(values), 2),
-                 "sum": round(sum(values), 2)}
-                for label, values in grouped.items()]
-        rows.sort(key=lambda row: (-row["count"], row["label"]))
-        if rows:
-            result[dim] = rows[:top]
-    return result
-
-
-def metric_entry(value, kind, records=None, field=None, note=None, reason=None):
-    """One metric: its value, and the breakdown of what went into it."""
-    entry = {
-        "value": value,
-        "kind": kind,
-        "status": "unavailable" if reason else ("proxy" if note else "ok"),
-        "reason": reason or note,
-    }
-    if reason is None and records is not None:
-        entry["breakdown"] = (value_breakdown(records, field) if field
-                              else count_breakdown(records))
-    else:
-        entry["breakdown"] = {}
-    return entry
-
-
-def shape_output(metrics, extras=None, coverage=None, include_coverage=False):
-    """Metrics only, in both the shapes the playbook needs.
-
-    ``metrics`` is a list, one item per metric, each carrying its value and a
-    ``breakdown`` object describing what the value is made of. The same values
-    are also flattened to top-level scalars, which is what an application field
-    maps to directly.
-
-    Nothing else is included by default: no record dumps, no period bounds. Set
-    ``include_coverage`` when diagnosing a run.
-    """
-    result = flatten_metrics(metrics)
-    result["metrics"] = [
-        {
-            "name": key,
-            "value": metrics[key].get("value"),
-            "kind": metrics[key].get("kind"),
-            "status": metrics[key].get("status"),
-            "reason": metrics[key].get("reason"),
-            "breakdown": metrics[key].get("breakdown") or {},
-        }
-        for key in sorted(metrics)
-    ]
-    for key, value in (extras or {}).items():
-        result[key] = value
-    if include_coverage and coverage is not None:
-        result["coverage"] = coverage
-    return result
-
 # ==========================================================================
 # end shared helper block
 # ==========================================================================
 
 
-#: Count metrics as a predicate over the open records, so the value and the
-#: breakdown always describe exactly the same subset.
-COUNT_METRICS = [
-    ("open_inc_total", lambda r: True),
-    ("open_more_than_five_days", lambda r: (r.get("age_days") or 0) > 5),
-    ("open_more_than_thirty_days", lambda r: (r.get("age_days") or 0) > 30),
-    ("stale_open_no_update_5d", lambda r: (r.get("days_since_update") or 0) > 5),
-    ("unassigned_open_count", lambda r: not r.get("assigned_to")),
-]
-
-#: Value metrics as the record field they average.
-VALUE_METRICS = [
-    ("age_open_inc", "age_days", "value_days", None),
-    ("age_last_update_open_inc", "days_since_update", "value_days", None),
-    ("state_dwell_hours", "dwell_hours", "value_hours",
-     "hours since last update, not since the state change"),
-]
-
-
 def compute_open_metrics(records, end):
-    """The open-base metrics, each carrying the breakdown of what it counted."""
+    """The twelve open-base metrics."""
     have = field_coverage(records, ["reassign_count"])
-    metrics = {}
-
-    for key, predicate in COUNT_METRICS:
-        subset = [r for r in records if predicate(r)]
-        metrics[key] = metric_entry(len(subset), "count", subset)
-
-    for key, field, kind, note in VALUE_METRICS:
-        subset = [r for r in records if r.get(field) is not None]
-        metrics[key] = metric_entry(
-            stats([r.get(field) for r in subset]), kind, subset, field, note)
-
-    owners = [r for r in records if r.get("assigned_to")]
-    metrics["distinct_agents"] = metric_entry(
-        len({r["assigned_to"] for r in owners}), "count", owners)
 
     ages = [r.get("age_days") for r in records]
-    oldest = [max(records, key=lambda r: r.get("age_days") or 0)] if records else []
-    metrics["oldest_open_age"] = metric_entry(
-        round(max(ages), 2) if ages else None, "days", oldest)
+    since_update = [r.get("days_since_update") for r in records]
+    unassigned = [r for r in records if not r.get("assigned_to")]
+
+    metrics = {
+        "open_inc_total": dict(ok(len(records)), kind="count"),
+        "open_more_than_five_days": dict(
+            ok(sum(1 for a in ages if (a or 0) > 5)), kind="count"),
+        "open_more_than_thirty_days": dict(
+            ok(sum(1 for a in ages if (a or 0) > 30)), kind="count"),
+        "stale_open_no_update_5d": dict(
+            ok(sum(1 for d in since_update if (d or 0) > 5)), kind="count"),
+        "distinct_agents": dict(
+            ok(len({r["assigned_to"] for r in records if r.get("assigned_to")})),
+            kind="count"),
+        "unassigned_open_count": dict(ok(len(unassigned)), kind="count"),
+        "oldest_open_age": dict(
+            ok(round(max(ages), 2) if ages else None), kind="days"),
+
+        "age_open_inc": dict(ok(stats(ages)), kind="value_days"),
+        "age_last_update_open_inc": dict(ok(stats(since_update)), kind="value_days"),
+
+        # Without a state-changed timestamp this is hours since the last update,
+        # which equals the specified measure only when that update was the state
+        # change. Marked as a proxy rather than passed off as exact.
+        "state_dwell_hours": dict(
+            ok(stats([r.get("dwell_hours") for r in records]),
+               "hours since last update, not since the state change"),
+            kind="value_hours"),
+    }
 
     if have["reassign_count"]:
-        counted = [r for r in records if r.get("reassign_count") is not None]
-        reassigned = [r for r in counted if (r.get("reassign_count") or 0) > 0]
-        metrics["reassign_count_open_inc"] = metric_entry(
-            stats([r.get("reassign_count") for r in counted]), "value",
-            counted, "reassign_count")
-        metrics["reassign_count_hist_open"] = metric_entry(
-            stats([r.get("reassign_count") for r in counted]), "value",
-            counted, "reassign_count")
-        metrics["reassigned_open_count"] = metric_entry(
-            len(reassigned), "count", reassigned)
+        counts = [r.get("reassign_count") for r in records]
+        metrics["reassign_count_open_inc"] = dict(ok(stats(counts)), kind="value")
+        metrics["reassigned_open_count"] = dict(
+            ok(sum(1 for c in counts if (c or 0) > 0)), kind="count")
+        metrics["reassign_count_hist_open"] = dict(ok(stats(counts)), kind="value")
     else:
         why = "needs a reassign count field on the CIM record"
-        metrics["reassign_count_open_inc"] = metric_entry(None, "value", reason=why)
-        metrics["reassigned_open_count"] = metric_entry(None, "count", reason=why)
-        metrics["reassign_count_hist_open"] = metric_entry(
-            None, "value",
-            reason="needs assignment history, or a reassign count field")
+        metrics["reassign_count_open_inc"] = dict(blocked(why), kind="value")
+        metrics["reassigned_open_count"] = dict(blocked(why), kind="count")
+        metrics["reassign_count_hist_open"] = dict(
+            blocked("needs assignment history, or a reassign count field"),
+            kind="value")
     return metrics
 
 
@@ -1076,27 +977,8 @@ def main(context=None):
     closed_looking = [r for r in records if r.get("is_closed_state")]
 
     metrics = compute_open_metrics(records, end)
-
-    coverage = {
-        "rows_fetched": len(records) + len(skipped) + filtered + len(future),
-        "records_used": len(records),
-        "records_skipped": len(skipped),
-        "records_filtered_by_hierarchy": filtered,
-        "records_created_after_period": len(future),
-        "records_in_closed_status": len(closed_looking),
-        "suspect_durations_dropped": suspect,
-        "unavailable": {k: m["reason"] for k, m in metrics.items()
-                        if m["status"] == "unavailable"},
-        "proxied": {k: m["reason"] for k, m in metrics.items()
-                    if m["status"] == "proxy"},
-        "skipped_detail": skipped[:50],
-        "warning": ("the open search returned {} record(s) already in a closed "
-                    "status: check its filter against your closed status list"
-                    .format(len(closed_looking)) if closed_looking else None),
-    }
-
-    extras = {"snapshot_date": snapshot}
-    extras.update(check_continuity(
+    result = flatten_metrics(metrics)
+    result.update(check_continuity(
         metrics["open_inc_total"]["value"],
         get_input(context, "previous_open_backlog"),
         get_input(context, "previous_snapshot_date"),
@@ -1105,8 +987,44 @@ def main(context=None):
         get_input(context, "closed_inc_total"),
     ))
 
-    return shape_output(metrics, extras, coverage,
-                        is_truthy(get_input(context, "include_coverage", False)))
+    result.update({
+        "snapshot_date": snapshot,
+        "period_start": to_iso(start),
+        "period_end": to_iso(end),
+        "metrics": metrics,
+        "breakdowns": {
+            "open_by_severity": count_by(records, "severity", order=PRIORITY_ORDER),
+            "open_by_status": count_by(records, "status"),
+            "open_by_owner": count_by(records, "assigned_to", top=10),
+            "open_by_threat_type": count_by(records, "threat_type", top=10),
+        },
+        "oldest_open": [
+            {"tracking_id": r.get("tracking_id"), "severity": r.get("severity"),
+             "assigned_to": r.get("assigned_to"), "status": r.get("status"),
+             "age_days": round(r.get("age_days") or 0, 2)}
+            for r in sorted(records, key=lambda r: r.get("age_days") or 0,
+                            reverse=True)[:10]
+        ],
+        "coverage": {
+            "rows_fetched": len(records) + len(skipped) + filtered + len(future),
+            "records_used": len(records),
+            "records_skipped": len(skipped),
+            "records_filtered_by_hierarchy": filtered,
+            "records_created_after_period": len(future),
+            "records_in_closed_status": len(closed_looking),
+            "suspect_durations_dropped": suspect,
+            "unavailable": {k: m["reason"] for k, m in metrics.items()
+                            if m["status"] == "unavailable"},
+            "proxied": {k: m["reason"] for k, m in metrics.items()
+                        if m["status"] == "proxy"},
+            "skipped_detail": skipped[:50],
+            "warning": ("the open search returned {} record(s) already in a "
+                        "closed status: check its filter against your closed "
+                        "status list".format(len(closed_looking))
+                        if closed_looking else None),
+        },
+    })
+    return result
 
 
 # ======================================================================
