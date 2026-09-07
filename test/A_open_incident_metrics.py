@@ -849,22 +849,26 @@ BREAKDOWN_DIMENSIONS = ["severity", "status", "assigned_to", "classification",
 
 
 def count_breakdown(records, dims=None, top=10):
-    """Compose a count metric: the same records sliced by each dimension.
+    """Compose a count metric as a flat array of rows.
 
-    A dimension no record carries is left out rather than filling the output
-    with rows that all read "Unassigned".
+    One row per dimension value, each tagged with the dimension it came from, so
+    a widget can filter to a single dimension or chart them all. A dimension no
+    record carries is left out rather than filling the array with rows that all
+    read "Unassigned".
     """
-    result = {}
+    rows = []
     for dim in (dims or BREAKDOWN_DIMENSIONS):
         if not any(r.get(dim) for r in records):
             continue
-        result[dim] = count_by(records, dim, top=top)
-    return result
+        for row in count_by(records, dim, top=top):
+            rows.append({"dimension": dim, "label": row["label"],
+                         "count": row["count"]})
+    return rows
 
 
 def value_breakdown(records, field, dims=None, top=10):
-    """Compose a value metric: count and mean of ``field`` per dimension."""
-    result = {}
+    """Compose a value metric as a flat array: count, mean and sum per value."""
+    rows = []
     for dim in (dims or BREAKDOWN_DIMENSIONS):
         if not any(r.get(dim) for r in records):
             continue
@@ -874,14 +878,16 @@ def value_breakdown(records, field, dims=None, top=10):
                 continue
             grouped.setdefault(str(record.get(dim) or "Unassigned"), []).append(
                 float(record[field]))
-        rows = [{"label": label, "count": len(values),
-                 "avg": round(sum(values) / len(values), 2),
-                 "sum": round(sum(values), 2)}
-                for label, values in grouped.items()]
-        rows.sort(key=lambda row: (-row["count"], row["label"]))
-        if rows:
-            result[dim] = rows[:top]
-    return result
+        ranked = sorted(grouped.items(), key=lambda item: (-len(item[1]), item[0]))
+        for label, values in ranked[:top]:
+            rows.append({
+                "dimension": dim,
+                "label": label,
+                "count": len(values),
+                "avg": round(sum(values) / len(values), 2),
+                "sum": round(sum(values), 2),
+            })
+    return rows
 
 
 def metric_entry(value, kind, records=None, field=None, note=None, reason=None):
@@ -896,7 +902,7 @@ def metric_entry(value, kind, records=None, field=None, note=None, reason=None):
         entry["breakdown"] = (value_breakdown(records, field) if field
                               else count_breakdown(records))
     else:
-        entry["breakdown"] = {}
+        entry["breakdown"] = []
     return entry
 
 
@@ -914,7 +920,7 @@ def shape_output(metrics, extras=None, coverage=None, include_coverage=False):
     combined = dict(metrics)
     for key, value in (extras or {}).items():
         combined[key] = {"value": value, "kind": "info", "status": "ok",
-                         "reason": None, "breakdown": {}}
+                         "reason": None, "breakdown": []}
 
     result = {"metrics": combined}
     if include_coverage and coverage is not None:

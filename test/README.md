@@ -68,16 +68,20 @@ One key: `metrics`. Every entry has the same shape.
   "kind": "count",
   "status": "ok",
   "reason": null,
-  "breakdown": {
-    "severity":    [{"label": "Critical", "count": 1}, {"label": "High", "count": 1}],
-    "status":      [{"label": "Blocked", "count": 1}, {"label": "New", "count": 1}],
-    "assigned_to": [{"label": "analyst.one", "count": 1}]
-  }
+  "breakdown": [
+    {"dimension": "severity",    "label": "Critical",    "count": 1},
+    {"dimension": "severity",    "label": "High",        "count": 1},
+    {"dimension": "status",      "label": "Blocked",     "count": 1},
+    {"dimension": "status",      "label": "New",         "count": 1},
+    {"dimension": "assigned_to", "label": "analyst.one", "count": 1}
+  ]
 }
 ```
 
-A **count** metric breaks down into counts per dimension, which always sum back
-to the metric itself. A **value** metric's own value is the distribution
+`breakdown` is a flat array. Every row carries the dimension it came from, so a
+widget filters to one dimension with `rows.filter(r => r.dimension === 'severity')`
+or charts them all. A **count** metric's rows within any one dimension always sum
+back to the metric itself. A **value** metric's own value is the distribution
 (count, sum, avg, min, max, p50, p90) and it breaks down into the count, mean
 and sum per dimension:
 
@@ -86,12 +90,14 @@ and sum per dimension:
   "value": {"count": 3, "sum": 19.62, "avg": 6.54, "min": 0.67, "max": 12.32,
             "p50": 6.62, "p90": 12.32},
   "kind": "value_days",
-  "breakdown": {"severity": [{"label": "Critical", "count": 1, "avg": 0.67, "sum": 0.67}]}
+  "breakdown": [
+    {"dimension": "severity", "label": "Critical", "count": 1, "avg": 0.67, "sum": 0.67}
+  ]
 }
 ```
 
-A metric that cannot be computed has a null value, an empty breakdown, and a
-`reason` naming the field it needs, so it is never mistaken for a real zero.
+A metric that cannot be computed has a null value, an empty breakdown array, and
+a `reason` naming the field it needs, so it is never mistaken for a real zero.
 
 Dimensions are severity, status, owner, classification, threat type and record
 type. Any the records do not carry is left out rather than filling the output
