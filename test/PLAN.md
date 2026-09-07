@@ -1,8 +1,8 @@
 # CIM KPI Playbook - Build Plan
 
 Target: a Turbine playbook that reads CIM records (fetch already exists), computes
-the metric catalog below, and writes one KPI record per period into the existing
-KPI application.
+the metric catalog below, and writes **one KPI record per day** into the existing
+KPI application, driven by a cron trigger at 11:55.
 
 Constraints this plan is built around:
 
@@ -30,7 +30,7 @@ repository rather than exporting real records.
 ## Playbook flow
 
 ```
-[ Trigger: schedule ]
+[ Cron trigger: daily at 11:55 ]
         |
 [ Search Records ]  ->  CIM application            (already built)
         |   records
@@ -40,7 +40,7 @@ repository rather than exporting real records.
         |
 [ Python: Script B - compute the metric catalog ]
         |   metrics, coverage
-[ Search Records ]  ->  KPI app, Period Key == metrics.period_key
+[ Search Records ]  ->  KPI app, Snapshot Date == metrics.snapshot_date
         |
 [ Python: Script C - build the storage payload ]
         |   fields, action, record_id
@@ -205,7 +205,7 @@ Two things to resolve before trusting the duration columns:
 
 ## Sprints
 
-### Sprint 0 - confirm the vocabulary (blocking, needs your answers)
+### Sprint 0 - confirm the vocabulary  [OPEN, needs your answers]
 
 No code. Five answers that change the arithmetic:
 
@@ -222,10 +222,15 @@ No code. Five answers that change the arithmetic:
 6. Whether your tenant supports a **reusable Python component or global script**,
    which decides whether the helper block is shared or repeated per script.
 
-Everything below runs on defaults if you would rather answer these later, but
-items 1, 2 and 4 will change the numbers.
+Sprints 1 to 4 are built and run on documented defaults, so these answers are
+corrections rather than blockers. Items 1, 2 and 4 will change the numbers.
+Item 7 below is new and decides the daily window.
 
-### Sprint 1 - Script A, normalize and classify
+7. Whether the 11:55 cron is **11:55 AM or 11:55 PM**, and which timezone the
+   trigger evaluates in. At 11:55 AM the run must use `period_mode: yesterday`
+   to record a complete day; at 23:55 it uses `full_today`.
+
+### Sprint 1 - Script A, normalize and classify  [DELIVERED]
 
 Deliverable: `A_normalize_cim_records.py`.
 
@@ -240,7 +245,7 @@ Deliverable: `A_normalize_cim_records.py`.
 Done when: every record is classified, records without a parsable First Created
 are reported rather than dropped, and the coverage block names the missing fields.
 
-### Sprint 2 - Script B part 1, counts and rates
+### Sprint 2 - Script B part 1, counts and rates  [DELIVERED]
 
 Deliverable: the count and rate half of `B_compute_kpi_metrics.py` (15 metrics).
 
@@ -248,7 +253,7 @@ Done when: the three base counts satisfy `opening + new - closed = closing` on a
 real extract, and `fp_rate`, `same_day_close_rate` agree with their numerators
 and denominators.
 
-### Sprint 3 - Script B part 2, durations and value metrics
+### Sprint 3 - Script B part 2, durations and value metrics  [DELIVERED]
 
 Deliverable: the value half of the same script (8 metrics).
 
@@ -260,7 +265,7 @@ is sparsely filled.
 Done when: durations round-trip against a hand-checked record, the suspect-value
 guard is exercised, and `mtta_hours` matches the Time to Acknowledge column.
 
-### Sprint 4 - Script C, storage and dashboard
+### Sprint 4 - Script C, storage and dashboard  [DELIVERED]
 
 Deliverable: `C_build_storage_payload.py`.
 
@@ -285,14 +290,15 @@ piece and only affects 2 metrics, so it is last.
 
 ## Storage shape
 
-One KPI record per period. Suggested fields, all produced by Script C:
+One KPI record per day, keyed on Snapshot Date. 76 fields, all produced by
+Script C:
 
 | Group | Fields |
 | --- | --- |
-| Key | Period Key, Period Start, Period End, Generated At, Run Status |
+| Key | Snapshot Date, Period Start, Period End, Run Status |
 | Counts | one numeric field per count metric (15) |
 | Rates | one numeric field per rate metric, stored as a percentage |
-| Values | `_avg`, `_sum`, `_p90` per value metric |
+| Values | `Avg`, `Sum`, `P90`, `Count` per value metric |
 | Payload | Dashboard JSON, Coverage JSON |
 
 Coverage JSON is stored alongside the numbers so a chart can grey out a metric
