@@ -75,47 +75,48 @@ but Turbine does not need it.
 
 ## What the output contains
 
-Metrics only. Every metric is a top-level scalar, and `breakdown` holds the
-composition of each one.
+Metrics only, in two shapes.
 
-```
-open_inc_total            3
-open_more_than_five_days   2
-age_open_inc_avg        6.54
-...
-breakdown: {
-  open_inc_total:            { severity: [...], status: [...], assigned_to: [...] },
-  open_more_than_five_days:  { severity: [...], status: [...] },
-  age_open_inc:              { severity: [{label, count, avg, sum}, ...] },
+`metrics` is an array, one item per metric, each with its own breakdown:
+
+```json
+{
+  "name": "open_inc_total",
+  "value": 3,
+  "kind": "count",
+  "status": "ok",
+  "reason": null,
+  "breakdown": {
+    "severity":    [{"label": "Critical", "count": 1}, {"label": "High", "count": 1}],
+    "status":      [{"label": "Blocked", "count": 1}, {"label": "New", "count": 1}],
+    "assigned_to": [{"label": "analyst.one", "count": 1}]
+  }
 }
 ```
 
-A count metric breaks down as counts per dimension, and those counts always sum
-to the metric itself. A value metric breaks down as the count and mean per
-dimension. The dimensions are severity, status, owner, classification, threat
-type and record type; any the records do not carry is left out rather than
-filling the output with "Unassigned" rows.
-
-The scalars are what an application field maps to:
+The same values are also flattened to top-level scalars, which is what an
+application field maps to directly:
 
 ```
 open_inc_total     ->  Open Inc Total
 age_open_inc_avg   ->  Avg Backlog Age Days
-new_inc_total      ->  New Inc Total
 mttr_hours_avg     ->  MTTR Hours
 ```
 
-A value metric expands to `_avg`, `_sum`, `_p90` and `_count`, so one metric
-answers both "sum" and "mean" without a re-run. `_count` is how many records
-carried the value, which is not the size of the base when a column is sparsely
-filled.
+A count metric breaks down into counts per dimension, which always sum back to
+the metric. A value metric breaks down into the count, mean and sum per
+dimension, and its own `value` is the full distribution: count, sum, avg, min,
+max, p50, p90. Flattened, that becomes `_avg`, `_sum`, `_p90` and `_count`.
 
-A metric that cannot be computed is null and carries no breakdown, so it never
-appears as a fabricated zero.
+Dimensions are severity, status, owner, classification, threat type and record
+type. Any the records do not carry is left out rather than filling the output
+with "Unassigned" rows.
 
-Diagnostics are off by default. Set `include_coverage` to true to add a
-`coverage` object with row counts, skipped records and the reason each blocked
-metric is unavailable.
+A metric that cannot be computed has a null value, an empty breakdown, and a
+`reason` saying what field it needs, so it is never mistaken for a real zero.
+
+Nothing else is in the output: no record dumps, no period bounds. Set
+`include_coverage` to true to add a `coverage` object while diagnosing a run.
 
 ---
 

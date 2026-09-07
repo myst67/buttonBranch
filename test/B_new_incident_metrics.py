@@ -888,15 +888,28 @@ def metric_entry(value, kind, records=None, field=None, note=None, reason=None):
 
 
 def shape_output(metrics, extras=None, coverage=None, include_coverage=False):
-    """Metrics only: a flat scalar per metric, plus a breakdown for each.
+    """Metrics only, in both the shapes the playbook needs.
 
-    The scalars are what an application field maps to. ``breakdown`` holds the
-    composition of every metric, keyed by metric name, so one output answers
-    both "what is the number" and "what is it made of".
+    ``metrics`` is a list, one item per metric, each carrying its value and a
+    ``breakdown`` object describing what the value is made of. The same values
+    are also flattened to top-level scalars, which is what an application field
+    maps to directly.
+
+    Nothing else is included by default: no record dumps, no period bounds. Set
+    ``include_coverage`` when diagnosing a run.
     """
     result = flatten_metrics(metrics)
-    result["breakdown"] = {key: entry["breakdown"] for key, entry in metrics.items()
-                           if entry.get("breakdown")}
+    result["metrics"] = [
+        {
+            "name": key,
+            "value": metrics[key].get("value"),
+            "kind": metrics[key].get("kind"),
+            "status": metrics[key].get("status"),
+            "reason": metrics[key].get("reason"),
+            "breakdown": metrics[key].get("breakdown") or {},
+        }
+        for key in sorted(metrics)
+    ]
     for key, value in (extras or {}).items():
         result[key] = value
     if include_coverage and coverage is not None:
