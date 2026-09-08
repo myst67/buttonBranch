@@ -47,7 +47,9 @@ export default class extends SwimlaneElement {
         select { font: inherit; color: inherit; background: transparent;
                  border: 1px solid currentColor; border-radius: 6px; padding: 3px 7px;
                  opacity: .8; }
-        .note { margin: 0; font-size: 12px; opacity: .75; }
+        .note { margin: 4px 0 0; font-size: 12px; opacity: .75; }
+        details { margin-top: 10px; font-size: 12px; }
+        summary { cursor: pointer; opacity: .8; }
         code { background: rgba(127,127,127,.2); padding: 1px 5px; border-radius: 4px; }
       `,
     ];
@@ -138,7 +140,41 @@ export default class extends SwimlaneElement {
         </select>
       </div>
       ${this.chart(points)}
-      ${this.dataNote(points)}`;
+      ${this.dataNote(points)}
+      ${this.sourceDetail()}`;
+  }
+
+  /**
+   * What the report actually handed over. Always available, because when a
+   * chart is thinner than expected the answer is in here and guessing at it
+   * from the outside is slow.
+   */
+  sourceDetail() {
+    const groups = (this.report && this.report.data) || [];
+    const perDay = this.perDay || new Map();
+    const names = groups.map((g) => String(g.name == null ? 'null' : g.name));
+    const dated = names.filter((n) => this.toDate(n));
+
+    return html`
+      <details>
+        <summary>What this report sent</summary>
+        <p class="note">
+          ${groups.length} group(s), of which ${dated.length} parse as a date.
+          ${perDay.size} day(s) charted.
+        </p>
+        <p class="note">
+          Group names:
+          ${names.slice(0, 12).map((n) => html`<code>${n.slice(0, 40)}</code> `)}
+          ${names.length > 12 ? html`and ${names.length - 12} more` : null}
+        </p>
+        ${groups.length <= 1 ? html`
+          <p class="note">
+            Only one group came back. If the application holds more days than
+            that, the report is paginated and the widget is seeing one page:
+            raise the report's page size, or remove the second dimension so each
+            day is its own group.
+          </p>` : null}
+      </details>`;
   }
 
   /**
