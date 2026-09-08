@@ -103,15 +103,23 @@ export default class extends SwimlaneElement {
     // How many readings landed on each day. More than one means the playbook
     // created several records for that date instead of updating one.
     this.perDay = new Map();
+    // Whether the y values are the metric itself or merely a count of records.
+    this.countsOnly = true;
 
     groups.forEach((group) => {
       const groupDate = this.toDate(group.name);
       (group.series || []).forEach((item) => {
         const date = groupDate || this.toDate(item.name);
         if (!date) return;
-        const value = groupDate
-          ? this.valueOf(item.name, item.value)
-          : Number(item.value) || 0;
+        // A group named by date carries the metric inside its series label; a
+        // series named by date carries only how many records fell on that day.
+        let value;
+        if (groupDate) {
+          value = this.valueOf(item.name, item.value);
+          this.countsOnly = false;
+        } else {
+          value = Number(item.value) || 0;
+        }
         this.perDay.set(date, (this.perDay.get(date) || 0) + 1);
         // Keep the largest reading for a day, so a day cannot appear twice.
         if (!byDate.has(date) || byDate.get(date) < value) byDate.set(date, value);
@@ -139,6 +147,13 @@ export default class extends SwimlaneElement {
             <option value=${n} ?selected=${n === this.days}>Last ${n} days</option>`)}
         </select>
       </div>
+      ${this.countsOnly ? html`
+        <p class="note">
+          The y axis is <strong>how many records</strong> fell on each day, not
+          the metric's value. An aggregated report over a text field can only
+          count records. To plot the value itself, group by the date field
+          <em>and</em> the metric field, or store the value in a numeric field.
+        </p>` : null}
       ${this.chart(points)}
       ${this.dataNote(points)}
       ${this.sourceDetail()}`;
