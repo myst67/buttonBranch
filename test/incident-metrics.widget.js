@@ -98,6 +98,9 @@ export default class extends SwimlaneElement {
   points() {
     const groups = (this.report && this.report.data) || [];
     const byDate = new Map();
+    // How many readings landed on each day. More than one means the playbook
+    // created several records for that date instead of updating one.
+    this.perDay = new Map();
 
     groups.forEach((group) => {
       const groupDate = this.toDate(group.name);
@@ -107,6 +110,7 @@ export default class extends SwimlaneElement {
         const value = groupDate
           ? this.valueOf(item.name, item.value)
           : Number(item.value) || 0;
+        this.perDay.set(date, (this.perDay.get(date) || 0) + 1);
         // Keep the largest reading for a day, so a day cannot appear twice.
         if (!byDate.has(date) || byDate.get(date) < value) byDate.set(date, value);
       });
@@ -134,10 +138,41 @@ export default class extends SwimlaneElement {
         </select>
       </div>
       ${this.chart(points)}
-      ${points.length === 1 ? html`
+      ${this.dataNote(points)}`;
+  }
+
+  /**
+   * Says why a chart looks thinner than expected, which is nearly always the
+   * data rather than the chart.
+   */
+  dataNote(points) {
+    const perDay = this.perDay || new Map();
+    const readings = [...perDay.values()].reduce((sum, n) => sum + n, 0);
+    const busiest = Math.max(0, ...perDay.values());
+
+    if (points.length === 1 && busiest > 1) {
+      return html`
+        <p class="note">
+          ${readings} records all carry the date ${points[0].date}, so there is
+          one day to plot. Each playbook run is creating a record rather than
+          updating that day's, which is what the upsert key is for. The highest
+          reading is charted.
+        </p>`;
+    }
+    if (points.length === 1) {
+      return html`
         <p class="note">
           One day recorded so far. The line builds as the playbook runs each day.
-        </p>` : null}`;
+        </p>`;
+    }
+    if (busiest > 1) {
+      return html`
+        <p class="note">
+          ${readings} records across ${points.length} days, so some days hold
+          more than one. The highest reading for each day is charted.
+        </p>`;
+    }
+    return null;
   }
 
   /**
