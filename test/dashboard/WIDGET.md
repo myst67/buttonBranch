@@ -18,16 +18,25 @@ so there is no library to install and no build step.
 
 ## Why a widget renders blank
 
-Three things the platform requires, all of which are easy to get wrong:
+Four things the platform requires. Break any one and the preview is empty with
+no error:
 
-1. **The class must be anonymous.** `export default class extends SwimlaneElement`,
-   with no name.
-2. **Do not call `customElements.define`.** The platform registers the default
-   export itself; defining it in the file stops it rendering.
-3. **`static get styles()` must return `[super.styles, css\`...\`]`.** Returning
-   only your own styles drops the frame's.
+1. **Use the versioned import specifier.** `'@swimlane/swimlane-element@2'`, not
+   the bare package name.
+2. **The class must be anonymous.** `export default class extends SwimlaneElement`.
+3. **Never call `customElements.define`.** The platform registers the default
+   export; defining it in the file stops it rendering.
+4. **`static get styles()` returns an array** beginning with `super.styles`.
 
-A widget that breaks any of these shows an empty preview with no error.
+Re-render when the data lands, which is after the first render:
+
+```js
+firstUpdated() { super.firstUpdated(); if (this.report) this.requestUpdate(); }
+updated(changed) {
+  super.updated(changed);
+  if (changed.has('report') && this.report) this.requestUpdate();
+}
+```
 
 ## The data contract
 
@@ -39,9 +48,13 @@ A report widget receives `this.report`:
 | `data` | the aggregated series the built-in charts draw |
 | `query` | the dimensions and measures configured on the report |
 
-This widget reads `rawData`, because it does its own arithmetic over the daily
-records. `data` is already grouped by whatever the report was set to, which is
-usually not the grouping a trend needs.
+This widget reads `rawData`, because a timeline needs one point per day and its
+own arithmetic. It falls back to `data[0].series` when the report exposes no raw
+rows, handling both the case where the group label is a date and the case where
+the report groups by the metric field and the label is the stored JSON.
+
+Raw rows may be keyed by **field id** rather than field key. The widget resolves
+either, using `contextData.application.fields` to map key to id.
 
 `this.contextData` carries `application`, `currentUser`, `origin` and `token`.
 

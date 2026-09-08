@@ -1,47 +1,28 @@
 /**
- * Open Incident Trend - a Turbine report widget.
+ * Open incidents over time, with the latest day's breakdown.
  *
- * Paste this whole file into a custom widget. It reads the daily metrics
- * records from the report it is placed on, and shows:
+ * A Turbine report widget. Paste the whole file into a custom report widget.
+ * No chart library and no CDN: the plot is inline SVG.
  *
- *   - the open backlog over the last X days, as a line
- *   - the headline number, with the change since the start of the window
- *   - the breakdown of the latest day, by a dimension you pick
+ * Structure follows a widget known to work in this tenant:
+ *   - versioned import specifier, '@swimlane/swimlane-element@2'
+ *   - anonymous default-export class
+ *   - no customElements.define; the platform registers the default export
+ *   - static get styles() returns an array
+ *   - firstUpdated/updated re-render once `report` arrives
  *
- * Nothing is fetched and nothing is imported beyond the Turbine element base,
- * so there is no CDN and no build step. The chart is inline SVG.
- *
- * ---------------------------------------------------------------------------
- * ONE THING TO CHECK ON FIRST RUN
- *
- * Turbine hands report data to a widget through a property on the element, and
- * the name of that property is not something this file can know in advance. So
- * it looks through the likely names, and if it finds none it renders a panel
- * listing the properties the element actually has, with the array-shaped ones
- * marked. Read that panel, then set DATA_PROPERTY below to the right name.
- * ---------------------------------------------------------------------------
+ * Data. The platform sets `this.report` to { data, rawData, query }:
+ *   rawData - one object per record, which is what a timeline needs
+ *   data    - aggregated series, grouped by the report's own dimensions
+ * This reads rawData when it is there, and falls back to data[0].series.
  */
 
-import { SwimlaneElement, css, html } from '@swimlane/swimlane-element';
-import { reportFrameTemplate } from '@swimlane/swimlane-element/templates.js';
+import { SwimlaneElement, css, html } from '@swimlane/swimlane-element@2';
 
-/**
- * The platform hands a report widget `this.report`, shaped
- * `{ data, rawData, query }`:
- *   rawData - the report's rows, one object per record
- *   data    - the aggregated series the built-in charts draw
- *   query   - the dimensions and measures configured on the report
- *
- * This widget reads `rawData`, because it does its own arithmetic over the
- * daily records. `data` is already grouped by whatever the report was set to.
- */
-
-/** The metric this widget charts. */
-const METRIC = 'open_inc_total';
+/** The field key to chart, and the day field. Change these to chart another. */
+const METRIC_KEY = 'open_inc_total';
 const METRIC_LABEL = 'Open incidents';
-
-/** Field names a record might use for its day. */
-const DATE_KEYS = ['snapshot_date', 'Snapshot Date', 'Snapshot Key', 'snapshotDate', 'date'];
+const DATE_KEYS = ['Snapshot Date', 'snapshot_date', 'Snapshot Key', 'snapshotDate', 'date'];
 
 const WINDOWS = [7, 14, 30, 60, 90];
 
@@ -57,205 +38,221 @@ export default class extends SwimlaneElement {
   constructor() {
     super();
     this.days = 30;
-    this.dimension = 'severity';
+    this.dimension = '';
     this.hover = null;
   }
 
   static get styles() {
-    return [super.styles, css`
-      :host {
-        display: block;
-        --surface: #fcfcfb; --plane: #f9f9f7;
-        --ink-1: #0b0b0b; --ink-2: #52514e; --muted: #898781;
-        --grid: #e1e0d9; --series: #2a78d6;
-        --good: #0ca30c; --bad: #d03b3b;
-        font: 13px/1.45 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
-        color: var(--ink-1);
-      }
-      @media (prefers-color-scheme: dark) {
-        :host {
-          --surface: #1a1a19; --plane: #0d0d0d;
-          --ink-1: #ffffff; --ink-2: #c3c2b7; --muted: #898781;
-          --grid: #2c2c2a; --series: #3987e5;
+    return [
+      super.styles,
+      css`
+        :host { display: block; --series: #2a78d6; --ink-2: #52514e; --muted: #898781;
+                --grid: #e1e0d9; --good: #0ca30c; --bad: #d03b3b; }
+        @media (prefers-color-scheme: dark) {
+          :host { --series: #3987e5; --ink-2: #c3c2b7; --grid: #2c2c2a; }
         }
-      }
-      .wrap { background: var(--surface); border: 1px solid var(--grid);
-              border-radius: 8px; padding: 14px; }
-      .head { display: flex; flex-wrap: wrap; gap: 10px; align-items: baseline;
-              justify-content: space-between; margin-bottom: 10px; }
-      h3 { margin: 0; font-size: 14px; font-weight: 600; }
-      select { font: inherit; color: var(--ink-1); background: var(--surface);
-               border: 1px solid var(--grid); border-radius: 6px; padding: 4px 8px; }
-      label { color: var(--ink-2); font-size: 12px; margin-right: 4px; }
-      .hero { font-size: 34px; font-weight: 600; line-height: 1.05;
-              font-variant-numeric: tabular-nums; }
-      .sub { font-size: 12px; color: var(--ink-2); margin-top: 3px; }
-      .up { color: var(--bad); } .down { color: var(--good); } .flat { color: var(--muted); }
-      .bars { margin-top: 6px; }
-      .row { display: flex; align-items: center; gap: 8px; margin: 5px 0; font-size: 12px; }
-      .row .name { width: 34%; color: var(--ink-2); overflow: hidden;
-                   text-overflow: ellipsis; white-space: nowrap; }
-      .row .track { flex: 1; height: 10px; background: var(--plane); border-radius: 5px; }
-      .row .fill { height: 10px; border-radius: 5px; background: var(--series); }
-      .row .n { width: 44px; text-align: right; font-variant-numeric: tabular-nums;
-                font-weight: 600; }
-      .diag { font-size: 12px; color: var(--ink-2); }
-      .diag code { background: var(--plane); padding: 1px 5px; border-radius: 4px;
-                   font-size: 11.5px; }
-      .diag li { margin: 3px 0; }
-      table { width: 100%; border-collapse: collapse; font-size: 12px;
-              font-variant-numeric: tabular-nums; margin-top: 8px; }
-      th, td { padding: 4px 6px; border-bottom: 1px solid var(--grid); text-align: right; }
-      th:first-child, td:first-child { text-align: left; }
-      th { color: var(--muted); font-weight: 600; }
-      details summary { cursor: pointer; color: var(--series); margin-top: 10px;
-                        font-size: 12px; }
-    `];
+        .head { display: flex; flex-wrap: wrap; gap: 10px; align-items: baseline;
+                justify-content: space-between; margin-bottom: 8px; }
+        h3 { margin: 0; font-size: 14px; font-weight: 600; }
+        select { font: inherit; border: 1px solid var(--grid); border-radius: 6px;
+                 padding: 4px 8px; background: transparent; color: inherit; }
+        label { color: var(--ink-2); font-size: 12px; margin-right: 4px; }
+        .hero { font-size: 32px; font-weight: 600; line-height: 1.05;
+                font-variant-numeric: tabular-nums; }
+        .sub { font-size: 12px; color: var(--ink-2); margin-top: 2px; }
+        .up { color: var(--bad); } .down { color: var(--good); } .flat { color: var(--muted); }
+        .row { display: flex; align-items: center; gap: 8px; margin: 5px 0; font-size: 12px; }
+        .row .name { width: 36%; color: var(--ink-2); overflow: hidden;
+                     text-overflow: ellipsis; white-space: nowrap; }
+        .row .track { flex: 1; height: 10px; background: rgba(127,127,127,.15);
+                      border-radius: 5px; }
+        .row .fill { height: 10px; border-radius: 5px; background: var(--series); }
+        .row .n { width: 46px; text-align: right; font-weight: 600;
+                  font-variant-numeric: tabular-nums; }
+        .note { font-size: 12px; color: var(--ink-2); }
+        code { background: rgba(127,127,127,.15); padding: 1px 5px; border-radius: 4px; }
+        table { width: 100%; border-collapse: collapse; font-size: 12px; margin-top: 8px;
+                font-variant-numeric: tabular-nums; }
+        th, td { padding: 4px 6px; border-bottom: 1px solid var(--grid); text-align: right; }
+        th:first-child, td:first-child { text-align: left; }
+        summary { cursor: pointer; color: var(--series); font-size: 12px; margin-top: 10px; }
+      `,
+    ];
   }
 
-  /* ---------------------------------------------------------------- data --- */
+  firstUpdated() {
+    super.firstUpdated();
+    if (this.report) this.requestUpdate();
+  }
 
-  /** The report's rows. */
-  rows() {
-    const raw = this.report && this.report.rawData;
-    return Array.isArray(raw) ? raw : [];
+  updated(changedProperties) {
+    super.updated(changedProperties);
+    if (changedProperties.has('report') && this.report) this.requestUpdate();
+  }
+
+  /* ----------------------------------------------------------------- data --- */
+
+  /**
+   * Raw rows may be keyed by field id rather than field key, so build a lookup
+   * from the application's field list and try both.
+   */
+  valueOf(row, wanted) {
+    if (row[wanted] !== undefined) return row[wanted];
+    const fields = (this.contextData && this.contextData.application
+      && this.contextData.application.fields) || [];
+    const field = fields.find((f) => f.key === wanted || f.name === wanted);
+    if (field && row[field.id] !== undefined) return row[field.id];
+    return undefined;
   }
 
   dateOf(row) {
     for (const key of DATE_KEYS) {
-      if (row[key]) return String(row[key]).slice(0, 10);
+      const value = this.valueOf(row, key);
+      if (value) return String(value).slice(0, 10);
     }
     return null;
   }
 
-  /** Read the metric off a row, whether it is an object or a JSON string. */
-  metricOf(row) {
-    const raw = row[METRIC] ?? (row.metrics || {})[METRIC];
+  /** A metric field may hold JSON, a plain number, or a nested metrics object. */
+  parseMetric(raw) {
     if (raw == null || raw === '') return null;
+    if (typeof raw === 'number') return { value: raw, breakdown: [] };
     if (typeof raw === 'object') return raw;
-    if (typeof raw === 'number') return { value: raw };
     try {
       return JSON.parse(raw);
     } catch (error) {
       const asNumber = Number(raw);
-      return isFinite(asNumber) ? { value: asNumber } : null;
+      return isFinite(asNumber) ? { value: asNumber, breakdown: [] } : null;
     }
   }
 
-  /** The last `days` rows, oldest first, each reduced to {date, value, breakdown}. */
-  series(rows) {
-    const points = rows
+  /** {date, value, breakdown} per day, oldest first, limited to the window. */
+  points() {
+    const report = this.report || {};
+    const rows = Array.isArray(report.rawData) ? report.rawData : [];
+
+    let series = rows
       .map((row) => {
         const date = this.dateOf(row);
-        const metric = this.metricOf(row);
+        const metric = this.parseMetric(this.valueOf(row, METRIC_KEY));
         if (!date || !metric) return null;
-        const value = typeof metric.value === 'object'
-          ? metric.value?.avg ?? null
-          : metric.value;
+        const value = metric.value && typeof metric.value === 'object'
+          ? metric.value.avg : metric.value;
         return value == null ? null
           : { date, value: Number(value), breakdown: metric.breakdown || [] };
       })
-      .filter(Boolean)
-      .sort((a, b) => a.date.localeCompare(b.date));
-    return points.slice(-this.days);
+      .filter(Boolean);
+
+    // Fall back to the aggregated series when the report exposes no raw rows.
+    if (!series.length) series = this.fromAggregated();
+
+    // One point per day; a re-run of a day would otherwise appear twice.
+    const byDate = new Map();
+    series.forEach((point) => byDate.set(point.date, point));
+    return [...byDate.values()]
+      .sort((a, b) => a.date.localeCompare(b.date))
+      .slice(-this.days);
   }
 
-  /* -------------------------------------------------------------- render --- */
+  /**
+   * report.data is grouped by the report's dimensions, so a point's `name` is
+   * the group label. When the report groups by the metric field, that label is
+   * the stored JSON; when it groups by date, the label is the date.
+   */
+  fromAggregated() {
+    const groups = (this.report && this.report.data) || [];
+    const series = (groups[0] && groups[0].series) || [];
+    return series
+      .map((item) => {
+        const label = String(item.name || '');
+        if (/^\d{4}-\d{2}-\d{2}/.test(label)) {
+          return { date: label.slice(0, 10), value: Number(item.value) || 0, breakdown: [] };
+        }
+        const parsed = this.parseMetric(label);
+        return parsed && parsed.snapshot_date
+          ? { date: String(parsed.snapshot_date).slice(0, 10),
+              value: Number(parsed.value) || 0, breakdown: parsed.breakdown || [] }
+          : null;
+      })
+      .filter(Boolean);
+  }
+
+  /* --------------------------------------------------------------- render --- */
 
   render() {
-    const rows = this.rows();
-    if (!rows.length) return this.renderEmpty();
-
-    const points = this.series(rows);
-    if (!points.length) {
-      return reportFrameTemplate(html`
-        <div class="wrap diag">
-          <h3>${METRIC_LABEL}</h3>
-          <p>
-            The report returned ${rows.length} row(s), but none carried a readable
-            <code>${METRIC}</code>. The keys on the first row are:
-          </p>
-          <p><code>${Object.keys(rows[0]).join(', ')}</code></p>
-          <p>Set <code>METRIC</code> at the top of this file to the right key.</p>
-        </div>`);
-    }
+    const points = this.points();
+    if (!points.length) return this.renderEmpty();
 
     const latest = points[points.length - 1];
-    const first = points[0];
-    const change = latest.value - first.value;
+    const change = latest.value - points[0].value;
     const tone = change > 0 ? 'up' : change < 0 ? 'down' : 'flat';
     const arrow = change > 0 ? '▲' : change < 0 ? '▼' : '■';
 
-    const dimensions = [...new Set(latest.breakdown.map((b) => b.dimension))];
+    const dimensions = [...new Set((latest.breakdown || []).map((b) => b.dimension))];
     const dimension = dimensions.includes(this.dimension) ? this.dimension : dimensions[0];
-    const bars = latest.breakdown.filter((b) => b.dimension === dimension);
-    const barMax = Math.max(1, ...bars.map((b) => b.count));
+    const bars = (latest.breakdown || []).filter((b) => b.dimension === dimension);
+    const barMax = Math.max(1, ...bars.map((b) => b.count || 0));
 
-    return reportFrameTemplate(html`
-      <div class="wrap">
-        <div class="head">
-          <h3>${METRIC_LABEL}</h3>
-          <span>
-            <label for="win">Last</label>
-            <select id="win" @change=${(e) => { this.days = Number(e.target.value); }}>
-              ${WINDOWS.map((n) => html`
-                <option value=${n} ?selected=${n === this.days}>${n} days</option>`)}
-            </select>
-          </span>
+    return html`
+      <div class="head">
+        <h3>${METRIC_LABEL}</h3>
+        <span>
+          <label for="win">Last</label>
+          <select id="win" @change=${(e) => { this.days = Number(e.target.value); }}>
+            ${WINDOWS.map((n) => html`
+              <option value=${n} ?selected=${n === this.days}>${n} days</option>`)}
+          </select>
+        </span>
+      </div>
+
+      <div class="hero">${latest.value.toLocaleString()}</div>
+      <div class="sub">
+        as at ${latest.date} ·
+        <span class=${tone}>${arrow} ${Math.abs(change).toLocaleString()}</span>
+        across ${points.length} day${points.length === 1 ? '' : 's'}
+      </div>
+
+      ${this.renderChart(points)}
+
+      ${bars.length ? html`
+        <div class="head" style="margin-top:12px">
+          <strong style="font-size:12.5px">Breakdown, ${latest.date}</strong>
+          ${dimensions.length > 1 ? html`
+            <select @change=${(e) => { this.dimension = e.target.value; }}>
+              ${dimensions.map((d) => html`
+                <option value=${d} ?selected=${d === dimension}>${d}</option>`)}
+            </select>` : null}
         </div>
+        ${bars.map((bar) => html`
+          <div class="row">
+            <span class="name" title=${bar.label}>${bar.label}</span>
+            <span class="track">
+              <span class="fill" style="width:${((bar.count || 0) / barMax) * 100}%"></span>
+            </span>
+            <span class="n">${(bar.count || 0).toLocaleString()}</span>
+          </div>`)}` : null}
 
-        <div class="hero">${latest.value.toLocaleString()}</div>
-        <div class="sub">
-          as at ${latest.date} ·
-          <span class=${tone}>${arrow} ${Math.abs(change).toLocaleString()}</span>
-          over ${points.length} day${points.length === 1 ? '' : 's'}
-        </div>
-
-        ${this.renderChart(points)}
-
-        ${bars.length ? html`
-          <div class="head" style="margin-top:14px">
-            <strong style="font-size:12.5px">Breakdown, ${latest.date}</strong>
-            ${dimensions.length > 1 ? html`
-              <select @change=${(e) => { this.dimension = e.target.value; }}>
-                ${dimensions.map((d) => html`
-                  <option value=${d} ?selected=${d === dimension}>${d}</option>`)}
-              </select>` : null}
-          </div>
-          <div class="bars">
-            ${bars.map((bar) => html`
-              <div class="row">
-                <span class="name" title=${bar.label}>${bar.label}</span>
-                <span class="track">
-                  <span class="fill" style="width:${(bar.count / barMax) * 100}%"></span>
-                </span>
-                <span class="n">${bar.count.toLocaleString()}</span>
-              </div>`)}
-          </div>` : null}
-
-        <details>
-          <summary>Show the numbers</summary>
-          <table>
-            <thead><tr><th>Date</th><th>${METRIC_LABEL}</th></tr></thead>
-            <tbody>
-              ${[...points].reverse().map((p) => html`
-                <tr><td>${p.date}</td><td>${p.value.toLocaleString()}</td></tr>`)}
-            </tbody>
-          </table>
-        </details>
-      </div>`);
+      <details>
+        <summary>Show the numbers</summary>
+        <table>
+          <thead><tr><th>Date</th><th>${METRIC_LABEL}</th></tr></thead>
+          <tbody>
+            ${[...points].reverse().map((p) => html`
+              <tr><td>${p.date}</td><td>${p.value.toLocaleString()}</td></tr>`)}
+          </tbody>
+        </table>
+      </details>`;
   }
 
-  /** Inline SVG line. One series, so the heading names it and no legend is needed. */
+  /** One series, so the heading names it and no legend is needed. */
   renderChart(points) {
     const width = 640;
-    const height = 170;
-    const pad = { top: 10, right: 46, bottom: 22, left: 38 };
+    const height = 165;
+    const pad = { top: 12, right: 44, bottom: 22, left: 38 };
     const plotW = width - pad.left - pad.right;
     const plotH = height - pad.top - pad.bottom;
 
-    const values = points.map((p) => p.value);
-    const max = Math.max(1, ...values);
+    const max = Math.max(1, ...points.map((p) => p.value));
     const niceMax = Math.ceil(max / 5) * 5 || 5;
     const x = (i) => pad.left + (points.length === 1 ? plotW / 2 : (i / (points.length - 1)) * plotW);
     const y = (v) => pad.top + plotH - (v / niceMax) * plotH;
@@ -272,7 +269,7 @@ export default class extends SwimlaneElement {
 
     return html`
       <svg viewBox="0 0 ${width} ${height}" width="100%" height=${height}
-           role="img" aria-label="${METRIC_LABEL} over the last ${points.length} days"
+           role="img" aria-label="${METRIC_LABEL} over ${points.length} days"
            @mousemove=${move} @mouseleave=${() => { this.hover = null; }}>
         ${[0, 0.5, 1].map((f) => {
           const tick = Math.round(niceMax * f);
@@ -293,26 +290,36 @@ export default class extends SwimlaneElement {
           <line x1=${x(this.hover)} x2=${x(this.hover)} y1=${pad.top} y2=${pad.top + plotH}
                 stroke="var(--muted)" stroke-width="1" stroke-dasharray="3 3"></line>
           <circle cx=${x(this.hover)} cy=${y(hovered.value)} r="4.5"
-                  fill="var(--series)" stroke="var(--surface)" stroke-width="2"></circle>
-          <text x=${x(this.hover)} y=${pad.top - 1} text-anchor="middle"
-                font-size="11.5" fill="var(--ink-1)">${hovered.date} · ${hovered.value}</text>`
+                  fill="var(--series)" stroke="#fff" stroke-width="2"></circle>
+          <text x=${x(this.hover)} y=${pad.top - 2} text-anchor="middle"
+                font-size="11.5" fill="currentColor">${hovered.date} · ${hovered.value}</text>`
         : html`
-          <text x=${x(points.length - 1) + 7} y=${y(points[points.length - 1].value) + 4}
+          <text x=${x(points.length - 1) + 6} y=${y(points[points.length - 1].value) + 4}
                 font-size="11.5" fill="var(--ink-2)">${points[points.length - 1].value}</text>`}
       </svg>`;
   }
 
-  /** Shown when the report returned no rows at all. */
+  /** Says which of the two possible causes it is, rather than just "no data". */
   renderEmpty() {
-    return reportFrameTemplate(html`
-      <div class="wrap diag">
-        <h3>${METRIC_LABEL}</h3>
-        <p>
-          This report returned no rows. Add the daily metrics application's
-          <code>Snapshot Date</code> and <code>${METRIC}</code> fields to the
-          report, and make sure it is not filtered to an empty range.
+    const report = this.report || {};
+    const rows = Array.isArray(report.rawData) ? report.rawData : [];
+    return html`
+      <div class="head"><h3>${METRIC_LABEL}</h3></div>
+      ${rows.length ? html`
+        <p class="note">
+          The report returned ${rows.length} row(s), but none carried a readable
+          <code>${METRIC_KEY}</code> with a date. The keys on the first row are:
         </p>
-      </div>`);
+        <p class="note"><code>${Object.keys(rows[0]).join(', ')}</code></p>
+        <p class="note">
+          Set <code>METRIC_KEY</code> and <code>DATE_KEYS</code> at the top of this
+          file to match.
+        </p>`
+      : html`
+        <p class="note">
+          This report returned no rows. Add the daily metrics application's date
+          field and <code>${METRIC_KEY}</code> as columns, and clear any filter
+          that empties the range.
+        </p>`}`;
   }
 }
-

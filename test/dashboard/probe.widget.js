@@ -11,8 +11,7 @@
  *   - styles as `[super.styles, css\`...\`]`, so the frame keeps its own
  */
 
-import { SwimlaneElement, css, html } from '@swimlane/swimlane-element';
-import { reportFrameTemplate } from '@swimlane/swimlane-element/templates.js';
+import { SwimlaneElement, css, html } from '@swimlane/swimlane-element@2';
 
 export default class extends SwimlaneElement {
   static get styles() {
@@ -28,12 +27,22 @@ export default class extends SwimlaneElement {
     ];
   }
 
+  firstUpdated() {
+    super.firstUpdated();
+    if (this.report) this.requestUpdate();
+  }
+
+  updated(changedProperties) {
+    super.updated(changedProperties);
+    if (changedProperties.has('report') && this.report) this.requestUpdate();
+  }
+
   render() {
     const report = this.report || {};
     const rawData = Array.isArray(report.rawData) ? report.rawData : [];
     const data = Array.isArray(report.data) ? report.data : [];
 
-    return reportFrameTemplate(html`
+    return html`
       <div class="p">
         <h4>report keys</h4>
         <pre>${Object.keys(report).join(', ') || 'this.report is undefined'}</pre>
@@ -50,7 +59,6 @@ export default class extends SwimlaneElement {
         <h4>application fields (key -> type)</h4>
         <pre>${(this.contextData?.application?.fields || [])
           .map((f) => `${f.key} -> ${f.fieldType}`).join('\n') || 'none'}</pre>
-      </div>
-    `);
+      </div>`;
   }
 }
