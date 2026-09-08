@@ -36,19 +36,19 @@ export default class extends SwimlaneElement {
     return [
       super.styles,
       css`
-        :host { display: block; --line: #2a78d6; --fill: rgba(42, 120, 214, .16);
-                --ink-2: #52514e; --muted: #898781; --grid: #e1e0d9; }
-        @media (prefers-color-scheme: dark) {
-          :host { --line: #3987e5; --fill: rgba(57, 135, 229, .22);
-                  --ink-2: #c3c2b7; --grid: #2c2c2a; }
-        }
+        /* Turbine renders dark without setting prefers-color-scheme, so the
+           chrome is drawn from the host's own text colour at low opacity and
+           reads correctly on any background. Only the series keeps a fixed
+           hue. */
+        :host { display: block; --line: #3987e5; --fill: rgba(57, 135, 229, .18); }
         .top { display: flex; align-items: baseline; justify-content: space-between;
                gap: 12px; margin-bottom: 6px; }
         h3 { margin: 0; font-size: 14px; font-weight: 600; }
         select { font: inherit; color: inherit; background: transparent;
-                 border: 1px solid var(--grid); border-radius: 6px; padding: 3px 7px; }
-        .note { margin: 0; font-size: 12px; color: var(--ink-2); }
-        code { background: rgba(127,127,127,.15); padding: 1px 5px; border-radius: 4px; }
+                 border: 1px solid currentColor; border-radius: 6px; padding: 3px 7px;
+                 opacity: .8; }
+        .note { margin: 0; font-size: 12px; opacity: .75; }
+        code { background: rgba(127,127,127,.2); padding: 1px 5px; border-radius: 4px; }
       `,
     ];
   }
@@ -133,7 +133,11 @@ export default class extends SwimlaneElement {
             <option value=${n} ?selected=${n === this.days}>Last ${n} days</option>`)}
         </select>
       </div>
-      ${this.chart(points)}`;
+      ${this.chart(points)}
+      ${points.length === 1 ? html`
+        <p class="note">
+          One day recorded so far. The line builds as the playbook runs each day.
+        </p>` : null}`;
   }
 
   /**
@@ -191,6 +195,9 @@ export default class extends SwimlaneElement {
       + `L${x(0)},${pad.top + plotH} Z`;
     const every = Math.max(1, Math.ceil(points.length / 7));
     const last = points[points.length - 1];
+    // A label above a high point would be clipped by the top edge, so it flips
+    // underneath once there is no room for it.
+    const labelY = (v) => (y(v) - 10 < pad.top + 4 ? y(v) + 16 : y(v) - 10);
 
     // Everything nested inside <svg> is built with the `svg` tag, not `html`.
     // A fragment built with `html` is parsed in the HTML namespace, so it is
@@ -202,14 +209,14 @@ export default class extends SwimlaneElement {
           const tick = step * n;
           return svg`
             <line x1="${pad.left}" x2="${width - pad.right}" y1="${y(tick)}" y2="${y(tick)}"
-                  stroke="var(--grid)" stroke-width="1"></line>
+                  stroke="currentColor" stroke-opacity="0.14" stroke-width="1"></line>
             <text x="${pad.left - 8}" y="${y(tick) + 4}" text-anchor="end" font-size="11"
-                  fill="var(--muted)">${tick}</text>`;
+                  fill="currentColor" fill-opacity="0.55">${tick}</text>`;
         })}
 
         ${points.map((p, i) => (i % every === 0 || i === points.length - 1
           ? svg`<text x="${x(i)}" y="${height - 10}" text-anchor="middle" font-size="11"
-                      fill="var(--muted)">${p.date.slice(5)}</text>`
+                      fill="currentColor" fill-opacity="0.55">${p.date.slice(5)}</text>`
           : null))}
 
         <path d="${area}" fill="var(--fill)" stroke="none"></path>
@@ -223,10 +230,10 @@ export default class extends SwimlaneElement {
 
         ${points.length <= 10
           ? points.map((p, i) => svg`
-              <text x="${x(i)}" y="${y(p.value) - 10}" text-anchor="middle" font-size="11"
-                    fill="var(--ink-2)">${p.value}</text>`)
-          : svg`<text x="${x(points.length - 1)}" y="${y(last.value) - 10}" text-anchor="end"
-                      font-size="11" fill="var(--ink-2)">${last.value}</text>`}
+              <text x="${x(i)}" y="${labelY(p.value)}" text-anchor="middle" font-size="11"
+                    fill="currentColor" fill-opacity="0.85">${p.value}</text>`)
+          : svg`<text x="${x(points.length - 1)}" y="${labelY(last.value)}" text-anchor="end"
+                      font-size="11" fill="currentColor" fill-opacity="0.85">${last.value}</text>`}
       </svg>`;
   }
 }
