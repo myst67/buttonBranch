@@ -21,13 +21,15 @@ import { SwimlaneElement, css, html } from '@swimlane/swimlane-element@2';
 
 export default class extends SwimlaneElement {
   static get properties() {
-    return { groupIndex: { type: Number }, selected: { type: Number } };
+    return { groupIndex: { type: Number }, selected: { type: Number },
+             days: { type: Number } };
   }
 
   constructor() {
     super();
     this.groupIndex = 0;
     this.selected = null;
+    this.days = 7;
   }
 
   static get styles() {
@@ -99,9 +101,68 @@ export default class extends SwimlaneElement {
     }
   }
 
+  /** A date from any shape a group name or field can take. */
+  toDate(value) {
+    if (value == null || value === '') return null;
+    const text = String(value).trim();
+    const iso = text.match(/^(\d{4})-(\d{2})-(\d{2})/);
+    if (iso) return `${iso[1]}-${iso[2]}-${iso[3]}`;
+    const parsed = new Date(text);
+    return isNaN(parsed.getTime()) ? null : parsed.toISOString().slice(0, 10);
+  }
+
+  /**
+   * A timeline built across groups, for a report grouped by date first and the
+   * metric second. Each group is then a day, and its series labels carry the
+   * stored object whose value belongs to that day.
+   */
+  timelineAcrossGroups(groups) {
+    const points = [];
+    groups.forEach((group) => {
+      const date = this.toDate(group.name);
+      if (!date) return;
+      const series = (group.series || []);
+      // A day holds one record, so one label. If a group somehow holds several,
+      // the one covering the most records is the representative value.
+      let best = null;
+      series.forEach((item) => {
+        const parsed = this.parseLabel(item.name);
+        if (!parsed || parsed.value == null) return;
+        const records = Number(item.value) || 0;
+        if (!best || records > best.records) {
+          const inner = parsed.value;
+          best = {
+            records,
+            value: inner && typeof inner === 'object' ? inner.avg : inner,
+            breakdown: parsed.breakdown || [],
+            description: parsed.description || '',
+            date,
+            raw: String(item.name),
+          };
+        }
+      });
+      if (!best) return;
+      // One point per day, so a day appearing twice cannot be plotted twice.
+      const existing = points.findIndex((p) => p.date === best.date);
+      if (existing < 0) points.push(best);
+      else if (best.records > points[existing].records) points[existing] = best;
+    });
+    return points.sort((a, b) => a.date.localeCompare(b.date));
+  }
+
   /** Points for the selected group, plus what they can support. */
   read() {
     const groups = (this.report && this.report.data) || [];
+
+    // Grouped by date first, metric second: every group is a day.
+    const across = groups.length > 1 ? this.timelineAcrossGroups(groups) : [];
+    if (across.length > 1) {
+      return {
+        groups, index: 0, group: { name: '' },
+        points: across.slice(-this.days), timeline: true, windowed: true,
+      };
+    }
+
     const index = Math.min(this.groupIndex, Math.max(0, groups.length - 1));
     const group = groups[index] || {};
 
@@ -124,13 +185,54 @@ export default class extends SwimlaneElement {
     if (timeline) points.sort((a, b) => a.date.localeCompare(b.date));
     else points.sort((a, b) => (Number(a.value) || 0) - (Number(b.value) || 0));
 
-    return { groups, index, group, points, timeline };
+    return { groups, index, group,
+             points: timeline ? points.slice(-this.days) : points,
+             timeline, windowed: timeline };
+  }
+
+  /** One series, so the heading names it and no legend is needed. */
+  lineChart(bars) {
+    if (bars.length < 2) return null;
+    const width = 620;
+    const height = 170;
+    const pad = { top: 12, right: 42, bottom: 24, left: 38 };
+    const plotW = width - pad.left - pad.right;
+    const plotH = height - pad.top - pad.bottom;
+
+    const max = Math.max(1, ...bars.map((b) => b.amount));
+    const niceMax = Math.ceil(max / 5) * 5 || 5;
+    const x = (i) => pad.left + (i / (bars.length - 1)) * plotW;
+    const y = (v) => pad.top + plotH - (v / niceMax) * plotH;
+    const path = bars.map((b, i) => `${i === 0 ? 'M' : 'L'}${x(i)},${y(b.amount)}`).join(' ');
+    const every = Math.max(1, Math.ceil(bars.length / 7));
+
+    return html`
+      <svg viewBox="0 0 ${width} ${height}" width="100%" height=${height}
+           role="img" aria-label="Value per day over ${bars.length} days">
+        ${[0, 0.5, 1].map((f) => {
+          const tick = Math.round(niceMax * f);
+          return html`
+            <line x1=${pad.left} x2=${width - pad.right} y1=${y(tick)} y2=${y(tick)}
+                  stroke="var(--grid)" stroke-width="1"></line>
+            <text x=${pad.left - 7} y=${y(tick) + 4} text-anchor="end"
+                  font-size="11" fill="var(--muted)">${tick}</text>`;
+        })}
+        ${bars.map((b, i) => (i % every === 0 ? html`
+          <text x=${x(i)} y=${height - 7} text-anchor="middle" font-size="11"
+                fill="var(--muted)">${String(b.label).slice(5)}</text>` : null))}
+        <path d=${path} fill="none" stroke="var(--bar)" stroke-width="2"
+              stroke-linejoin="round" stroke-linecap="round"></path>
+        ${bars.map((b, i) => html`
+          <circle cx=${x(i)} cy=${y(b.amount)} r="3.5" fill="var(--bar)"></circle>`)}
+        <text x=${x(bars.length - 1) + 6} y=${y(bars[bars.length - 1].amount) + 4}
+              font-size="11.5" fill="var(--ink-2)">${bars[bars.length - 1].amount}</text>
+      </svg>`;
   }
 
   /* ---------------------------------------------------------------- render */
 
   render() {
-    const { groups, index, group, points, timeline } = this.read();
+    const { groups, index, group, points, timeline, windowed } = this.read();
 
     if (!groups.length) {
       return html`
@@ -170,7 +272,13 @@ export default class extends SwimlaneElement {
                  each bar is how many records held that value.`}
       </p>
 
-      ${groups.length > 1 ? html`
+      ${windowed ? html`
+        <select @change=${(e) => { this.days = Number(e.target.value); this.selected = null; }}>
+          ${[7, 14, 30, 60, 90, 3650].map((n) => html`
+            <option value=${n} ?selected=${n === this.days}>
+              ${n === 3650 ? 'All time' : `Last ${n} days`}</option>`)}
+        </select>`
+      : groups.length > 1 ? html`
         <select @change=${(e) => { this.groupIndex = Number(e.target.value); this.selected = null; }}>
           ${groups.map((g, i) => html`
             <option value=${i} ?selected=${i === index}>${g.name}</option>`)}
@@ -199,6 +307,8 @@ export default class extends SwimlaneElement {
             })()}</b>
             <span>Mean value</span></span>`}
       </div>
+
+      ${timeline ? this.lineChart(bars) : null}
 
       ${bars.map((bar, i) => html`
         <div class="row ${selected === bar.point ? 'on' : ''}"
