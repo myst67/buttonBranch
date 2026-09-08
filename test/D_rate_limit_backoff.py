@@ -33,6 +33,9 @@ max_delay     num    default 300 seconds, the ceiling on any single wait.
 retry_on      list   status codes to retry. Defaults to the transient set.
 now           num    epoch seconds, for deciding an absolute reset header.
                      Defaults to the clock.
+rate_window   num    default 60, the seconds RateLimit-Limit is counted over.
+calls_planned int    how many calls the playbook still intends to make. With
+                     the quota, it turns into how long that will take.
 
 Outputs
 -------
@@ -43,6 +46,12 @@ give_up       bool   true when the call failed and no attempts are left.
 succeeded     bool   true when the response was a 2xx.
 reason        str    one line explaining the decision, for the run log.
 wait_source   str    where wait_seconds came from: a header, or backoff.
+rate_limit    int    RateLimit-Limit, the calls allowed per window, or null.
+rate_remaining int   RateLimit-Remaining, calls left in this window, or null.
+pace_seconds  num    how long to wait between calls to stay under the quota:
+                     rate_window / rate_limit. Feed it to the Delay action
+                     inside the loop that makes the calls.
+pace_note     str    one line on what the quota implies for calls_planned.
 """
 
 import random
@@ -59,6 +68,14 @@ DEFAULT_RETRY_ON = [429, 500, 502, 503, 504]
 # rest are here because gateways in front of an API often add their own.
 WAIT_HEADERS = ["retry-after", "ratelimit-reset", "x-ratelimit-reset",
                 "x-rate-limit-reset"]
+
+# The quota itself, and how much of it is left. Trend Micro documents
+# RateLimit-Limit on the 429 response; a gateway may also send it on a 2xx,
+# which is the more useful place because it lets the playbook pace itself
+# before it is blocked rather than after.
+LIMIT_HEADERS = ["ratelimit-limit", "x-ratelimit-limit", "x-rate-limit-limit"]
+REMAINING_HEADERS = ["ratelimit-remaining", "x-ratelimit-remaining",
+                     "x-rate-limit-remaining"]
 
 # A reset header holding a number larger than this is an absolute epoch time
 # rather than a count of seconds to wait. Roughly a year in seconds: no API
@@ -173,6 +190,71 @@ def wait_from_headers(headers, now):
     return None, None
 
 
+def leading_int(value):
+    """The first integer in a header value.
+
+    RFC 9239 allows a compound form - ``100, 100;w=60`` - so the quota can
+    arrive with the window appended. Reading only the leading number keeps
+    both the bare and the compound shapes working.
+    """
+    digits = ""
+    for ch in str(value).strip():
+        if ch.isdigit():
+            digits += ch
+        elif digits:
+            break
+        elif ch not in "+ ":
+            break
+    return int(digits) if digits else None
+
+
+def first_header_int(headers, names):
+    for name in names:
+        raw = find_header(headers, name)
+        if raw is None or raw == "":
+            continue
+        found = leading_int(raw)
+        if found is not None:
+            return found
+    return None
+
+
+def pacing(headers, window, calls_planned):
+    """Turn the quota into a delay to put between calls.
+
+    RateLimit-Limit answers a different question from Retry-After. Retry-After
+    says when this blocked call may be repeated; the quota says how fast the
+    playbook is allowed to go in the first place. Spacing calls evenly at
+    window/limit keeps it under the ceiling instead of bursting into it and
+    then waiting, which is what produced the 429.
+    """
+    limit = first_header_int(headers, LIMIT_HEADERS)
+    remaining = first_header_int(headers, REMAINING_HEADERS)
+
+    if not limit or limit <= 0:
+        return {"rate_limit": limit, "rate_remaining": remaining,
+                "pace_seconds": None,
+                "pace_note": "No RateLimit-Limit header on this response. Check "
+                             "a successful call's headers; if the quota is only "
+                             "sent on a 429, read it once and pass it in."}
+
+    pace = round(float(window) / limit, 3)
+    note = "{} calls per {}s, so {}s between calls.".format(limit, window, pace)
+    if calls_planned:
+        minutes = round(calls_planned * pace / 60.0, 1)
+        note += (" {} planned calls need about {} minute(s) at that pace"
+                 .format(calls_planned, minutes))
+        if calls_planned > limit:
+            note += (", and exceed the quota in a single window: batch them or "
+                     "spread the run.")
+        else:
+            note += "."
+    if remaining is not None:
+        note += " {} left in the current window.".format(remaining)
+    return {"rate_limit": limit, "rate_remaining": remaining,
+            "pace_seconds": pace, "pace_note": note}
+
+
 def backoff(attempt, base_delay, max_delay):
     """Exponential backoff with full jitter.
 
@@ -210,10 +292,16 @@ def decide():
     retry_on = [as_int(code) for code in retry_on if as_int(code) is not None]
     now = as_int(get_input("now"), int(time.time()))
 
+    window = as_int(get_input("rate_window", 60), 60)
+    calls_planned = as_int(get_input("calls_planned"), 0)
+
     base = {"status_code": status, "attempt": attempt,
             "next_attempt": attempt + 1, "wait_seconds": 0,
             "should_retry": False, "give_up": False, "succeeded": False,
             "wait_source": None}
+    # The quota is read from every response, not only the failures, so a
+    # successful call still tells the playbook how fast it may go.
+    base.update(pacing(headers, window, calls_planned))
 
     if 200 <= status < 300:
         base.update(succeeded=True, next_attempt=attempt,
