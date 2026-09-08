@@ -143,3 +143,30 @@ the application field set does not change shape the day the source is added.
 A metric defined as a value rather than a count returns `_avg`, `_sum`, `_p90`
 and `_count`. `_count` is how many records carried the value, which is not the
 size of the base when a column is sparsely filled.
+
+## Field type to declare in the application
+
+Take `open_inc_total` as the worked example. The script returns it as an
+object, and the two useful pieces of it go into two different field types.
+
+| Application field | Type | Bind to | Stores |
+| --- | --- | --- | --- |
+| `Open Inc Total` | Numeric | `metrics.open_inc_total.value` | `373` |
+| `Open Inc Total Detail` | Text, multi-line | `metrics.open_inc_total` | the whole JSON object |
+| `Snapshot Date` | Date | `metrics.snapshot_date.value` | `2026-09-08` |
+| `Snapshot Key` | Text | `metrics.snapshot_date.value` | `2026-09-08`, the upsert key |
+
+The **numeric** field is the one a report can chart. A numeric field offers
+Sum, Average, Min, Max and Last as the measure, so a report grouped by
+`Snapshot Date` returns one point per day carrying the metric itself.
+
+A **text** field offers only `Count of`. That counts records sharing the same
+string, so a chart built on it plots how many times a value repeated, not the
+value. That is why a JSON-only application charts the record count.
+
+Storing both is not duplication with a cost: the numeric field is the measure,
+the text field is what a tooltip or a drill-down reads for the breakdown. Only
+the numeric one is ever selected under Edit Measure.
+
+This is a field-mapping change in the playbook's Save/Update Record action.
+The scripts already return both shapes and do not change.
