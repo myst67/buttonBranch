@@ -17,7 +17,7 @@
  * nothing to put on the x axis.
  */
 
-import { SwimlaneElement, css, html } from '@swimlane/swimlane-element@2';
+import { SwimlaneElement, css, html, svg } from '@swimlane/swimlane-element@2';
 
 const TITLE = 'Open incidents';
 const DEFAULT_DAYS = 7;
@@ -175,7 +175,7 @@ export default class extends SwimlaneElement {
   chart(points) {
     const width = 640;
     const height = 240;
-    const pad = { top: 14, right: 16, bottom: 30, left: 42 };
+    const pad = { top: 14, right: 16, bottom: 30, left: 46 };
     const plotW = width - pad.left - pad.right;
     const plotH = height - pad.top - pad.bottom;
 
@@ -184,48 +184,49 @@ export default class extends SwimlaneElement {
     const top = step * 4;
     const x = (i) => pad.left + (points.length === 1 ? plotW / 2 : (i / (points.length - 1)) * plotW);
     const y = (v) => pad.top + plotH - (v / top) * plotH;
-    const path = points.map((p, i) => `${i === 0 ? 'M' : 'L'}${x(i)},${y(p.value)}`).join(' ');
-    // The same path closed down to the baseline, so the line reads as an area.
-    const area = `${path} L${x(points.length - 1)},${pad.top + plotH} `
+
+    const line = points.map((p, i) => `${i === 0 ? 'M' : 'L'}${x(i)},${y(p.value)}`).join(' ');
+    // The same path closed to the baseline, so the line reads as an area.
+    const area = `${line} L${x(points.length - 1)},${pad.top + plotH} `
       + `L${x(0)},${pad.top + plotH} Z`;
     const every = Math.max(1, Math.ceil(points.length / 7));
+    const last = points[points.length - 1];
 
+    // Everything nested inside <svg> is built with the `svg` tag, not `html`.
+    // A fragment built with `html` is parsed in the HTML namespace, so it is
+    // appended but never drawn - the chart comes out blank.
     return html`
-      <svg viewBox="0 0 ${width} ${height}" width="100%" height=${height}
+      <svg viewBox="0 0 ${width} ${height}" width="100%" height="${height}"
            role="img" aria-label="${TITLE} per day over the last ${points.length} days">
         ${[0, 1, 2, 3, 4].map((n) => {
           const tick = step * n;
-          return html`
-            <line x1=${pad.left} x2=${width - pad.right} y1=${y(tick)} y2=${y(tick)}
+          return svg`
+            <line x1="${pad.left}" x2="${width - pad.right}" y1="${y(tick)}" y2="${y(tick)}"
                   stroke="var(--grid)" stroke-width="1"></line>
-            <text x=${pad.left - 8} y=${y(tick) + 4} text-anchor="end" font-size="11"
+            <text x="${pad.left - 8}" y="${y(tick) + 4}" text-anchor="end" font-size="11"
                   fill="var(--muted)">${tick}</text>`;
         })}
 
-        ${points.map((p, i) => (i % every === 0 || i === points.length - 1 ? html`
-          <text x=${x(i)} y=${height - 10} text-anchor="middle" font-size="11"
-                fill="var(--muted)">${p.date.slice(5)}</text>` : null))}
+        ${points.map((p, i) => (i % every === 0 || i === points.length - 1
+          ? svg`<text x="${x(i)}" y="${height - 10}" text-anchor="middle" font-size="11"
+                      fill="var(--muted)">${p.date.slice(5)}</text>`
+          : null))}
 
-        <path d=${area} fill="var(--fill)" stroke="none"></path>
-        <path d=${path} fill="none" stroke="var(--line)" stroke-width="2"
+        <path d="${area}" fill="var(--fill)" stroke="none"></path>
+        <path d="${line}" fill="none" stroke="var(--line)" stroke-width="2"
               stroke-linejoin="round" stroke-linecap="round"></path>
 
-        ${points.map((p, i) => html`
-          <g>
-            <circle cx=${x(i)} cy=${y(p.value)} r="4" fill="var(--line)"></circle>
+        ${points.map((p, i) => svg`
+          <circle cx="${x(i)}" cy="${y(p.value)}" r="4" fill="var(--line)">
             <title>${p.date}: ${p.value}</title>
-          </g>`)}
+          </circle>`)}
 
-        ${/* A number on every point collides once the window widens, so label
-              them only while they fit, and otherwise just the latest. */
-          points.length <= 10
-            ? points.map((p, i) => html`
-                <text x=${x(i)} y=${y(p.value) - 9} text-anchor="middle" font-size="11"
-                      fill="var(--ink-2)">${p.value}</text>`)
-            : html`
-                <text x=${x(points.length - 1)} y=${y(points[points.length - 1].value) - 9}
-                      text-anchor="end" font-size="11" fill="var(--ink-2)"
-                      >${points[points.length - 1].value}</text>`}
+        ${points.length <= 10
+          ? points.map((p, i) => svg`
+              <text x="${x(i)}" y="${y(p.value) - 10}" text-anchor="middle" font-size="11"
+                    fill="var(--ink-2)">${p.value}</text>`)
+          : svg`<text x="${x(points.length - 1)}" y="${y(last.value) - 10}" text-anchor="end"
+                      font-size="11" fill="var(--ink-2)">${last.value}</text>`}
       </svg>`;
   }
 }
