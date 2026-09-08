@@ -22,27 +22,30 @@
  * ---------------------------------------------------------------------------
  */
 
-import { SwimlaneElement, html, css } from '@swimlane/swimlane-element';
+import { SwimlaneElement, css, html } from '@swimlane/swimlane-element';
+import { reportFrameTemplate } from '@swimlane/swimlane-element/templates.js';
 
-/** Set this once you know the property name; leave null to auto-discover. */
-const DATA_PROPERTY = null;
+/**
+ * The platform hands a report widget `this.report`, shaped
+ * `{ data, rawData, query }`:
+ *   rawData - the report's rows, one object per record
+ *   data    - the aggregated series the built-in charts draw
+ *   query   - the dimensions and measures configured on the report
+ *
+ * This widget reads `rawData`, because it does its own arithmetic over the
+ * daily records. `data` is already grouped by whatever the report was set to.
+ */
 
 /** The metric this widget charts. */
 const METRIC = 'open_inc_total';
 const METRIC_LABEL = 'Open incidents';
-
-/** Property names to try, in order, when discovering the report rows. */
-const CANDIDATE_PROPERTIES = [
-  'reportData', 'report', 'data', 'rows', 'records', 'results',
-  'reportRecords', 'friendly', 'raw',
-];
 
 /** Field names a record might use for its day. */
 const DATE_KEYS = ['snapshot_date', 'Snapshot Date', 'Snapshot Key', 'snapshotDate', 'date'];
 
 const WINDOWS = [7, 14, 30, 60, 90];
 
-export default class OpenIncidentTrend extends SwimlaneElement {
+export default class extends SwimlaneElement {
   static get properties() {
     return {
       days: { type: Number },
@@ -59,7 +62,7 @@ export default class OpenIncidentTrend extends SwimlaneElement {
   }
 
   static get styles() {
-    return css`
+    return [super.styles, css`
       :host {
         display: block;
         --surface: #fcfcfb; --plane: #f9f9f7;
@@ -107,38 +110,15 @@ export default class OpenIncidentTrend extends SwimlaneElement {
       th { color: var(--muted); font-weight: 600; }
       details summary { cursor: pointer; color: var(--series); margin-top: 10px;
                         font-size: 12px; }
-    `;
+    `];
   }
 
   /* ---------------------------------------------------------------- data --- */
 
-  /** Find the report rows, whatever the platform called the property. */
-  findRows() {
-    const names = DATA_PROPERTY ? [DATA_PROPERTY] : CANDIDATE_PROPERTIES;
-    for (const name of names) {
-      const found = this.unwrap(this[name]);
-      if (found) return { rows: found, from: name };
-    }
-    // Last resort: any own property holding an array of objects with a date.
-    for (const name of Object.keys(this)) {
-      const found = this.unwrap(this[name]);
-      if (found) return { rows: found, from: name };
-    }
-    return { rows: null, from: null };
-  }
-
-  /** Accept an array, or an object wrapping one under a familiar key. */
-  unwrap(value, depth = 0) {
-    if (!value || depth > 2) return null;
-    if (Array.isArray(value)) {
-      return value.length && value.some((row) => row && this.dateOf(row)) ? value : null;
-    }
-    if (typeof value !== 'object') return null;
-    for (const key of ['results', 'records', 'rows', 'data', 'friendly', 'raw', 'items']) {
-      const inner = this.unwrap(value[key], depth + 1);
-      if (inner) return inner;
-    }
-    return null;
+  /** The report's rows. */
+  rows() {
+    const raw = this.report && this.report.rawData;
+    return Array.isArray(raw) ? raw : [];
   }
 
   dateOf(row) {
@@ -183,18 +163,21 @@ export default class OpenIncidentTrend extends SwimlaneElement {
   /* -------------------------------------------------------------- render --- */
 
   render() {
-    const { rows, from } = this.findRows();
-    if (!rows) return this.renderDiagnostics();
+    const rows = this.rows();
+    if (!rows.length) return this.renderEmpty();
 
     const points = this.series(rows);
     if (!points.length) {
-      return html`<div class="wrap">
-        <h3>${METRIC_LABEL}</h3>
-        <p class="diag">
-          Found ${rows.length} row(s) on <code>${from}</code>, but none carried a
-          readable <code>${METRIC}</code>. Check the field name on the report.
-        </p>
-      </div>`;
+      return reportFrameTemplate(html`
+        <div class="wrap diag">
+          <h3>${METRIC_LABEL}</h3>
+          <p>
+            The report returned ${rows.length} row(s), but none carried a readable
+            <code>${METRIC}</code>. The keys on the first row are:
+          </p>
+          <p><code>${Object.keys(rows[0]).join(', ')}</code></p>
+          <p>Set <code>METRIC</code> at the top of this file to the right key.</p>
+        </div>`);
     }
 
     const latest = points[points.length - 1];
@@ -208,7 +191,7 @@ export default class OpenIncidentTrend extends SwimlaneElement {
     const bars = latest.breakdown.filter((b) => b.dimension === dimension);
     const barMax = Math.max(1, ...bars.map((b) => b.count));
 
-    return html`
+    return reportFrameTemplate(html`
       <div class="wrap">
         <div class="head">
           <h3>${METRIC_LABEL}</h3>
@@ -260,7 +243,7 @@ export default class OpenIncidentTrend extends SwimlaneElement {
             </tbody>
           </table>
         </details>
-      </div>`;
+      </div>`);
   }
 
   /** Inline SVG line. One series, so the heading names it and no legend is needed. */
@@ -319,43 +302,17 @@ export default class OpenIncidentTrend extends SwimlaneElement {
       </svg>`;
   }
 
-  /**
-   * Shown only when the report data could not be located. It lists what the
-   * element actually holds, so the right property name can be read off and set
-   * as DATA_PROPERTY at the top of this file.
-   */
-  renderDiagnostics() {
-    const own = Object.keys(this).filter((key) => !key.startsWith('_'));
-    const describe = (key) => {
-      const value = this[key];
-      if (Array.isArray(value)) return `array of ${value.length}`;
-      if (value && typeof value === 'object') return `object {${Object.keys(value).slice(0, 6).join(', ')}}`;
-      return typeof value;
-    };
-    return html`
+  /** Shown when the report returned no rows at all. */
+  renderEmpty() {
+    return reportFrameTemplate(html`
       <div class="wrap diag">
         <h3>${METRIC_LABEL}</h3>
         <p>
-          No report rows found. This widget looked for
-          ${CANDIDATE_PROPERTIES.map((n) => html`<code>${n}</code> `)}
-          and none held an array of records with a date.
+          This report returned no rows. Add the daily metrics application's
+          <code>Snapshot Date</code> and <code>${METRIC}</code> fields to the
+          report, and make sure it is not filtered to an empty range.
         </p>
-        <p>The properties this widget can see are:</p>
-        <ul>
-          ${own.length
-            ? own.map((key) => html`<li><code>${key}</code> — ${describe(key)}</li>`)
-            : html`<li>none</li>`}
-        </ul>
-        <p>
-          Set <code>DATA_PROPERTY</code> at the top of this file to whichever of
-          those holds the report rows, then save.
-        </p>
-      </div>`;
+      </div>`);
   }
 }
 
-// Guarded so the file can also be imported by a test or a bundler, where the
-// custom-element registry does not exist.
-if (typeof customElements !== 'undefined' && !customElements.get('open-incident-trend')) {
-  customElements.define('open-incident-trend', OpenIncidentTrend);
-}

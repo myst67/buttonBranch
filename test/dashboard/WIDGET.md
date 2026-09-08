@@ -16,23 +16,34 @@ so there is no library to install and no build step.
    `open-incident-trend.widget.js`.
 3. Save and open it.
 
-## On the first run, check the data property
+## Why a widget renders blank
 
-Turbine passes report data to a widget through a property on the element, and
-the name of that property is not something the file can know in advance. So it
-tries the likely names, and if none of them hold report rows it renders a panel
-listing the properties the element actually has, with the shape of each.
+Three things the platform requires, all of which are easy to get wrong:
 
-Read the name off that panel and set it at the top of the file:
+1. **The class must be anonymous.** `export default class extends SwimlaneElement`,
+   with no name.
+2. **Do not call `customElements.define`.** The platform registers the default
+   export itself; defining it in the file stops it rendering.
+3. **`static get styles()` must return `[super.styles, css\`...\`]`.** Returning
+   only your own styles drops the frame's.
 
-```js
-const DATA_PROPERTY = 'reportData';   // whatever the panel showed
-```
+A widget that breaks any of these shows an empty preview with no error.
 
-Leave it `null` to keep auto-discovering. Discovery is tested against eight
-shapes, including `reportData` as a plain array, `report.results`,
-`data.records`, `report.raw.results`, and a property under a name it has never
-heard of.
+## The data contract
+
+A report widget receives `this.report`:
+
+| Property | What it holds |
+| --- | --- |
+| `rawData` | the report's rows, one object per record |
+| `data` | the aggregated series the built-in charts draw |
+| `query` | the dimensions and measures configured on the report |
+
+This widget reads `rawData`, because it does its own arithmetic over the daily
+records. `data` is already grouped by whatever the report was set to, which is
+usually not the grouping a trend needs.
+
+`this.contextData` carries `application`, `currentUser`, `origin` and `token`.
 
 ## What it reads
 
