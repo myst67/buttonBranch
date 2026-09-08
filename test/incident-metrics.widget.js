@@ -122,15 +122,7 @@ export default class extends SwimlaneElement {
   render() {
     const points = this.points();
 
-    if (!points.length) {
-      return html`
-        <div class="top"><h3>${TITLE}</h3></div>
-        <p class="note">
-          No dates in this report, so there is nothing to put on the x axis. On
-          the Query tab set <code>EDIT DIMENSIONS</code> to the date field first
-          and the metric second, both as Group By.
-        </p>`;
-    }
+    if (!points.length) return this.renderNoDates();
 
     return html`
       <div class="top">
@@ -141,6 +133,42 @@ export default class extends SwimlaneElement {
         </select>
       </div>
       ${this.chart(points)}`;
+  }
+
+  /**
+   * No date could be read, so show what the report actually sent. Guessing at
+   * the shape from the outside is what makes this slow; the labels themselves
+   * settle it.
+   */
+  renderNoDates() {
+    const groups = (this.report && this.report.data) || [];
+    const trim = (value, n) => {
+      const text = String(value == null ? 'null' : value);
+      return text.length > n ? `${text.slice(0, n)}...` : text;
+    };
+
+    return html`
+      <div class="top"><h3>${TITLE}</h3></div>
+      <p class="note">
+        No date could be read from this report, so there is nothing for the x
+        axis. On the Query tab set <code>EDIT DIMENSIONS</code> to the date
+        field first and the metric second, both as Group By.
+      </p>
+      ${groups.length ? html`
+        <p class="note">What this report sent, ${groups.length} group(s):</p>
+        <ul class="note">
+          ${groups.slice(0, 6).map((g) => html`
+            <li>
+              group <code>${trim(g.name, 60)}</code>
+              — ${(g.series || []).length} series, first label
+              <code>${trim((g.series || [])[0] && (g.series || [])[0].name, 90)}</code>
+            </li>`)}
+        </ul>
+        <p class="note">
+          If a group name above is your date, it is not parsing; send it to me
+          and I will match it.
+        </p>`
+      : html`<p class="note">The report sent no groups at all.</p>`}`;
   }
 
   chart(points) {
