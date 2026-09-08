@@ -105,10 +105,28 @@ export default class extends SwimlaneElement {
     return undefined;
   }
 
+  /** A date from any of the shapes a group label or field value can take. */
+  toDate(value) {
+    if (value == null || value === '') return null;
+    const text = String(value).trim();
+    const iso = text.match(/^(\d{4})-(\d{2})-(\d{2})/);
+    if (iso) return `${iso[1]}-${iso[2]}-${iso[3]}`;
+    const parsed = new Date(text);
+    if (!isNaN(parsed.getTime())) return parsed.toISOString().slice(0, 10);
+    return null;
+  }
+
   dateOf(row) {
     for (const key of DATE_KEYS) {
-      const value = this.valueOf(row, key);
-      if (value) return String(value).slice(0, 10);
+      const date = this.toDate(this.valueOf(row, key));
+      if (date) return date;
+    }
+    // Any property that parses as a date, for a report whose date column is
+    // named something this file has not been told about.
+    for (const key of Object.keys(row)) {
+      if (key === '$type' || key === 'count') continue;
+      const date = this.toDate(row[key]);
+      if (date) return date;
     }
     return null;
   }
@@ -155,26 +173,48 @@ export default class extends SwimlaneElement {
   }
 
   /**
-   * report.data is grouped by the report's dimensions, so a point's `name` is
-   * the group label. When the report groups by the metric field, that label is
-   * the stored JSON; when it groups by date, the label is the date.
+   * `report.data` is grouped by the report's dimensions, as
+   * `[{ name, series: [{ name, value }] }]`.
+   *
+   * Two arrangements are useful here:
+   *   grouped by date        - the group name is the day, and a series label
+   *                            carries the stored JSON whose `value` is wanted
+   *   grouped by the metric  - the series label is the stored JSON and the day
+   *                            comes from inside it
+   *
+   * A "Count of" measure counts rows, not values, so `item.value` is only used
+   * when no JSON label is available to read the real number from.
    */
   fromAggregated() {
     const groups = (this.report && this.report.data) || [];
-    const series = (groups[0] && groups[0].series) || [];
-    return series
-      .map((item) => {
-        const label = String(item.name || '');
-        if (/^\d{4}-\d{2}-\d{2}/.test(label)) {
-          return { date: label.slice(0, 10), value: Number(item.value) || 0, breakdown: [] };
-        }
-        const parsed = this.parseMetric(label);
-        return parsed && parsed.snapshot_date
-          ? { date: String(parsed.snapshot_date).slice(0, 10),
-              value: Number(parsed.value) || 0, breakdown: parsed.breakdown || [] }
-          : null;
-      })
-      .filter(Boolean);
+    const points = [];
+
+    groups.forEach((group) => {
+      const groupDate = this.toDate(group.name);
+      const series = (group && group.series) || [];
+
+      series.forEach((item) => {
+        const parsed = this.parseMetric(item.name);
+        const hasValue = parsed && parsed.value != null;
+        const date = groupDate
+          || (parsed && this.toDate(parsed.snapshot_date))
+          || this.toDate(item.name);
+        if (!date) return;
+
+        const value = hasValue
+          ? (typeof parsed.value === 'object' ? parsed.value.avg : parsed.value)
+          : Number(item.value);
+        if (value == null || isNaN(value)) return;
+
+        points.push({
+          date,
+          value: Number(value),
+          breakdown: (parsed && parsed.breakdown) || [],
+          fromCount: !hasValue,
+        });
+      });
+    });
+    return points;
   }
 
   /* --------------------------------------------------------------- render --- */
@@ -299,27 +339,42 @@ export default class extends SwimlaneElement {
       </svg>`;
   }
 
-  /** Says which of the two possible causes it is, rather than just "no data". */
+  /** Names the actual cause, rather than saying "no data". */
   renderEmpty() {
     const report = this.report || {};
     const rows = Array.isArray(report.rawData) ? report.rawData : [];
+    const groups = Array.isArray(report.data) ? report.data : [];
+    const firstLabel = groups[0] && groups[0].series && groups[0].series[0]
+      && groups[0].series[0].name;
+
     return html`
       <div class="head"><h3>${METRIC_LABEL}</h3></div>
       ${rows.length ? html`
         <p class="note">
-          The report returned ${rows.length} row(s), but none carried a readable
-          <code>${METRIC_KEY}</code> with a date. The keys on the first row are:
+          ${rows.length} row(s) came back, but none carried a readable
+          <code>${METRIC_KEY}</code> alongside a date. The keys on the first row:
         </p>
         <p class="note"><code>${Object.keys(rows[0]).join(', ')}</code></p>
+        <p class="note">Set <code>METRIC_KEY</code> and <code>DATE_KEYS</code> to match.</p>`
+      : groups.length ? html`
         <p class="note">
-          Set <code>METRIC_KEY</code> and <code>DATE_KEYS</code> at the top of this
-          file to match.
-        </p>`
+          This report is <strong>aggregated</strong>: it returned ${groups.length}
+          group(s) but no raw rows, so there is no per-day value to plot.
+        </p>
+        <p class="note">
+          On the report's Query tab, remove the measure and the Group By, and add
+          the date field and <code>${METRIC_KEY}</code> as plain columns. A
+          "Count of" measure counts records, not the values inside them, so it
+          cannot produce this trend.
+        </p>
+        ${firstLabel ? html`
+          <p class="note">First group label seen: <code>${String(firstLabel).slice(0, 120)}</code></p>`
+          : null}`
       : html`
         <p class="note">
-          This report returned no rows. Add the daily metrics application's date
-          field and <code>${METRIC_KEY}</code> as columns, and clear any filter
-          that empties the range.
+          This report returned nothing at all: no rows and no groups. Add the
+          daily metrics application's date field and <code>${METRIC_KEY}</code>
+          as columns, and clear any filter that empties the range.
         </p>`}`;
   }
 }

@@ -38,6 +38,25 @@ updated(changed) {
 }
 ```
 
+## Configuring the report
+
+**Use a plain column report, not an aggregated one.**
+
+| Do | Don't |
+| --- | --- |
+| Add the date field and `open_inc_total` as columns | Add a measure with "Count of" |
+| Leave Group By empty | Group By the date or the metric |
+
+A "Count of" measure counts *records*, not the values inside them, so a day
+where the backlog was 148 contributes 1. It is also the only aggregation
+Swimlane offers on a text field, since text cannot be summed. That is why the
+trend needs raw rows.
+
+The widget still reads an aggregated report where it can: if the groups carry
+the stored JSON it recovers the real values, and if they only carry counts it
+plots the counts and says so. But a plain column report is the shape that works
+without caveats.
+
 ## The data contract
 
 A report widget receives `this.report`:
