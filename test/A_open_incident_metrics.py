@@ -983,10 +983,17 @@ def shape_output(metrics, extras=None, coverage=None, include_coverage=False):
         combined[key] = {"value": value, "kind": "info", "status": "ok",
                          "reason": None, "breakdown": []}
 
+    # Each entry carries the day it describes. Without it a metric object is
+    # not self-describing, and anything that reads one field on its own - a
+    # report grouped by that field, an export, a chart - has no way to place the
+    # value in time.
+    snapshot = (extras or {}).get("snapshot_date")
+
     # Every entry explains itself, so a tile or tooltip does not have to carry
     # its own copy of the wording.
     for key, entry in combined.items():
         entry["description"] = METRIC_DESCRIPTIONS.get(key, "")
+        entry["snapshot_date"] = snapshot
 
     result = {"metrics": combined}
     if include_coverage and coverage is not None:

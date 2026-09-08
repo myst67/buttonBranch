@@ -52,10 +52,14 @@ where the backlog was 148 contributes 1. It is also the only aggregation
 Swimlane offers on a text field, since text cannot be summed. That is why the
 trend needs raw rows.
 
-The widget still reads an aggregated report where it can: if the groups carry
-the stored JSON it recovers the real values, and if they only carry counts it
-plots the counts and says so. But a plain column report is the shape that works
-without caveats.
+The widget still reads an aggregated report where it can. Each metric object
+carries its own `snapshot_date`, so even a report grouped by the metric field -
+where the series label is the stored JSON - yields a full timeline. Where a group
+carries only a count it plots the count and marks the point.
+
+Records written before that change have no date inside the metric object. For
+those, only a plain column report can produce a trend; re-run the playbook for a
+day and its record picks the date up.
 
 ## The data contract
 
