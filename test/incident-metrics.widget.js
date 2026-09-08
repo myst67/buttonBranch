@@ -36,10 +36,11 @@ export default class extends SwimlaneElement {
     return [
       super.styles,
       css`
-        :host { display: block; --line: #2a78d6; --ink-2: #52514e; --muted: #898781;
-                --grid: #e1e0d9; }
+        :host { display: block; --line: #2a78d6; --fill: rgba(42, 120, 214, .16);
+                --ink-2: #52514e; --muted: #898781; --grid: #e1e0d9; }
         @media (prefers-color-scheme: dark) {
-          :host { --line: #3987e5; --ink-2: #c3c2b7; --grid: #2c2c2a; }
+          :host { --line: #3987e5; --fill: rgba(57, 135, 229, .22);
+                  --ink-2: #c3c2b7; --grid: #2c2c2a; }
         }
         .top { display: flex; align-items: baseline; justify-content: space-between;
                gap: 12px; margin-bottom: 6px; }
@@ -184,6 +185,9 @@ export default class extends SwimlaneElement {
     const x = (i) => pad.left + (points.length === 1 ? plotW / 2 : (i / (points.length - 1)) * plotW);
     const y = (v) => pad.top + plotH - (v / top) * plotH;
     const path = points.map((p, i) => `${i === 0 ? 'M' : 'L'}${x(i)},${y(p.value)}`).join(' ');
+    // The same path closed down to the baseline, so the line reads as an area.
+    const area = `${path} L${x(points.length - 1)},${pad.top + plotH} `
+      + `L${x(0)},${pad.top + plotH} Z`;
     const every = Math.max(1, Math.ceil(points.length / 7));
 
     return html`
@@ -202,6 +206,7 @@ export default class extends SwimlaneElement {
           <text x=${x(i)} y=${height - 10} text-anchor="middle" font-size="11"
                 fill="var(--muted)">${p.date.slice(5)}</text>` : null))}
 
+        <path d=${area} fill="var(--fill)" stroke="none"></path>
         <path d=${path} fill="none" stroke="var(--line)" stroke-width="2"
               stroke-linejoin="round" stroke-linecap="round"></path>
 
