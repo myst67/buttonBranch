@@ -118,6 +118,48 @@
       }
     </div>
 
+    <div class="filters">
+      <label>
+        <span>Client</span>
+        <select name="filterClient" [ngModel]="filterClient()"
+                (ngModelChange)="filterClient.set($event)">
+          <option value="">All clients</option>
+          @for (client of clients(); track client) {
+            <option [value]="client">{{ client }}</option>
+          }
+        </select>
+      </label>
+      <label>
+        <span>Shift</span>
+        <select name="filterShift" [ngModel]="filterShift()"
+                (ngModelChange)="filterShift.set($event)">
+          <option value="">All shifts</option>
+          @for (shift of shifts; track shift) {
+            <option [value]="shift">{{ shift }}</option>
+          }
+        </select>
+      </label>
+      @if (view() === 'roster') {
+        <label>
+          <span>Employee</span>
+          <input type="search" name="filterName" placeholder="Type a name"
+                 [ngModel]="filterName()" (ngModelChange)="filterName.set($event)">
+        </label>
+      }
+      @if (filtering()) {
+        <button type="button" class="button" (click)="clearFilters()">Clear</button>
+        <p class="hint">
+          @if (view() === 'roster') {
+            Showing {{ visibleRows().length }} of {{ sheet.rows.length }} employees.
+          } @else {
+            Showing {{ visibleCoverage().length }} of {{ sheet.coverage.length }} client/shift rows.
+          }
+          Filters change this view only - the stats above and both downloads
+          always carry the whole roster.
+        </p>
+      }
+    </div>
+
     @if (view() === 'roster') {
       <div class="grid-wrap">
         <table class="grid">
@@ -134,7 +176,7 @@
             </tr>
           </thead>
           <tbody>
-            @for (row of sheet.rows; track row.name) {
+            @for (row of visibleRows(); track row.name) {
               <tr>
                 <td class="sticky-1 name">{{ row.name }}</td>
                 <td class="sticky-2 muted">{{ row.client_label }}</td>
@@ -145,6 +187,11 @@
                   <td [class]="cell" [class.weekend]="isWeekend($index)">{{ cell }}</td>
                 }
               </tr>
+            }
+            @if (!visibleRows().length) {
+              <tr><td class="sticky-1 muted" [attr.colspan]="sheet.days.length + (showWhy ? 3 : 2)">
+                No employee matches these filters.
+              </td></tr>
             }
           </tbody>
         </table>
@@ -162,7 +209,7 @@
             </tr>
           </thead>
           <tbody>
-            @for (entry of sheet.coverage; track entry.client + entry.shift) {
+            @for (entry of visibleCoverage(); track entry.client + entry.shift) {
               <tr>
                 <td class="sticky-1 name">{{ entry.client }}</td>
                 <td class="sticky-2" [class]="'sticky-2 ' + entry.shift">{{ entry.shift }}</td>
@@ -172,6 +219,11 @@
                   </td>
                 }
               </tr>
+            }
+            @if (!visibleCoverage().length) {
+              <tr><td class="sticky-1 muted" [attr.colspan]="sheet.days.length + 2">
+                No client/shift row matches these filters.
+              </td></tr>
             }
           </tbody>
         </table>

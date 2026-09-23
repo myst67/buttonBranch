@@ -16,6 +16,17 @@
   color: var(--accent); font-weight: 600; }
 .toggle { font-size: 12px; color: var(--muted); display: flex; align-items: center; gap: 5px; }
 
+/* View filters. They wrap on a narrow window rather than squeezing the grid,
+   and the "showing n of m" line takes the whole row under them so the count is
+   read as a statement about the table, not as another control. */
+.filters { display: flex; flex-wrap: wrap; align-items: end; gap: 10px; margin-bottom: 8px; }
+.filters label { display: flex; flex-direction: column; gap: 3px; font-size: 12px;
+  color: var(--muted); }
+.filters select, .filters input { font-size: 13px; padding: 5px 8px; min-width: 11rem;
+  border: 1px solid var(--line); border-radius: 6px; background: var(--card); color: inherit; }
+.filters .button { padding: 6px 12px; }
+.filters .hint { flex: 1 1 100%; margin: 0; }
+
 .grid-wrap { overflow: auto; max-height: 68vh; border: 1px solid var(--line); border-radius: 8px; }
 .grid { border-collapse: separate; border-spacing: 0; font-size: 12px; white-space: nowrap; }
 .grid th, .grid td { border-right: 1px solid var(--line-soft);

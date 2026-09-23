@@ -21,6 +21,44 @@ export class RosterTable {
   protected readonly view = signal<'roster' | 'coverage'>('roster');
   protected readonly shifts = SHIFTS;
 
+  // View filters. They narrow what the table shows and nothing else: the stats
+  // above describe the whole roster, and the downloads always carry all of it.
+  protected readonly filterClient = signal('');
+  protected readonly filterShift = signal('');
+  protected readonly filterName = signal('');
+
+  /** Every client in the roster, for the client picker. */
+  protected readonly clients = computed(() => this.roster()?.clients ?? []);
+
+  protected readonly filtering = computed(
+    () => !!(this.filterClient() || this.filterShift() || this.filterName().trim()));
+
+  protected readonly visibleRows = computed(() => {
+    const rows = this.roster()?.rows ?? [];
+    const client = this.filterClient();
+    const shift = this.filterShift();
+    const name = this.filterName().trim().toLowerCase();
+    return rows.filter((row) =>
+      (!client || row.clients.includes(client)) &&
+      (!shift || row.shift === shift) &&
+      (!name || row.name.toLowerCase().includes(name)));
+  });
+
+  /** The coverage view honours client and shift; a person's name is not in it. */
+  protected readonly visibleCoverage = computed(() => {
+    const coverage = this.roster()?.coverage ?? [];
+    const client = this.filterClient();
+    const shift = this.filterShift();
+    return coverage.filter((entry) =>
+      (!client || entry.client === client) && (!shift || entry.shift === shift));
+  });
+
+  protected clearFilters(): void {
+    this.filterClient.set('');
+    this.filterShift.set('');
+    this.filterName.set('');
+  }
+
   /** The thinnest client/shift/day cover anywhere in the month - rule 5 at a glance. */
   protected readonly minimumCover = computed(() =>
     this.roster()?.coverage.reduce((min, row) => Math.min(min, row.min), Infinity) ?? 0);
