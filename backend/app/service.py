@@ -17,7 +17,7 @@ from .models import MonthRoster
 from .parsing import parse_roster_file
 from .roster import GeneratedRoster, build_roster
 from .solver import (EmployeeInput, InfeasibleRoster, SolverOptions,
-                     check_feasibility, solve_roster)
+                     classify_feasibility, solve_roster)
 from .validation import validate
 
 #: Generated rosters kept in memory for the download endpoints.
@@ -71,7 +71,10 @@ class RosterService:
 
         target = parsed.next_month()
         employees = self._employees_from(parsed)
-        blockers = check_feasibility(employees, SolverOptions())
+        # Blockers are the arithmetic ones - no roster obeying rule 5 exists
+        # while they hold. Advisories describe the team's shape and can be
+        # accepted at generate time, so they must not read as "cannot build".
+        blockers, advisories = classify_feasibility(employees, SolverOptions())
 
         return {
             "month": parsed.month,
@@ -81,7 +84,9 @@ class RosterService:
             "clients": parsed.clients,
             "warnings": parsed.warnings,
             "blockers": blockers,
+            "advisories": advisories,
             "ready": not blockers,
+            "clean": not blockers and not advisories,
             "training": self.model_report(),
         }
 
@@ -109,7 +114,8 @@ class RosterService:
                  employees: Optional[list[dict]] = None, seed: int = 42,
                  time_limit_seconds: float = 20.0,
                  min_per_client_shift: int = MIN_PER_CLIENT_SHIFT,
-                 balance_slack: int = 1) -> GeneratedRoster:
+                 balance_slack: int = 1,
+                 accept_team_shape: bool = False) -> GeneratedRoster:
         """Build the target month from the stored history (rule 1-6 guaranteed)."""
         base = self.store.load(source_month) if source_month else self.store.latest()
         if base is None and not employees:
@@ -129,7 +135,8 @@ class RosterService:
 
         options = SolverOptions(min_per_client_shift=min_per_client_shift,
                                 balance_slack=balance_slack, seed=seed,
-                                time_limit_seconds=time_limit_seconds)
+                                time_limit_seconds=time_limit_seconds,
+                                accept_team_shape=accept_team_shape)
         result = solve_roster(team, self.learner, options)
 
         meta = {
@@ -143,7 +150,7 @@ class RosterService:
             "training": self.model_report(),
         }
         roster = build_roster(result.assignments, target, meta)
-        roster.validation = validate(roster)
+        roster.validation = validate(roster, accept_team_shape=accept_team_shape)
 
         roster_id = uuid.uuid4().hex[:12]
         roster.meta["id"] = roster_id

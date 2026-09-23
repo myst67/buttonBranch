@@ -32,6 +32,20 @@
       </div>
     }
 
+    @if (sheet.validation.ok && sheet.validation.team_shape.length) {
+      <div class="alert warn">
+        <strong>Built over {{ sheet.validation.team_shape.length }} rule 2
+          exception(s) in the team:</strong>
+        <ul>
+          @for (entry of sheet.validation.team_shape.slice(0, 10); track entry) {
+            <li>{{ entry }}</li>
+          }
+        </ul>
+        <p>The schedule above obeys every rule. These describe the team that was
+          fed in - the generator cannot change who serves which client.</p>
+      </div>
+    }
+
     <div class="stats">
       @for (shift of shifts; track shift) {
         <div class="stat">

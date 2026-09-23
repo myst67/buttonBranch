@@ -11,8 +11,18 @@ from .config import (MAX_CLIENTS_PER_EMPLOYEE, MIN_CLIENTS_PER_EMPLOYEE,
 from .roster import GeneratedRoster
 
 
-def validate(roster: GeneratedRoster) -> dict:
+def validate(roster: GeneratedRoster, accept_team_shape: bool = False) -> dict:
+    """Re-check the produced roster against every rule.
+
+    ``accept_team_shape`` moves the rule 2 findings - which describe the team
+    that was fed in, not the schedule that came out - into their own list
+    instead of counting them as roster errors. The scheduling rules (3, 4, 5)
+    are checked identically either way, so a roster is never reported clean
+    because of this flag; it only stops an input the generator cannot fix from
+    masking whether the schedule itself is sound.
+    """
     errors: list[str] = []
+    team_shape: list[str] = []
     days = roster.month.days
     day_count = len(days)
 
@@ -57,17 +67,25 @@ def validate(roster: GeneratedRoster) -> dict:
     counts: dict[str, int] = {}
     for row in roster.rows:
         if not MIN_CLIENTS_PER_EMPLOYEE <= len(row.clients) <= MAX_CLIENTS_PER_EMPLOYEE:
-            errors.append(f"{row.name}: has {len(row.clients)} client(s); expected "
-                          f"{MIN_CLIENTS_PER_EMPLOYEE}-{MAX_CLIENTS_PER_EMPLOYEE}.")
+            team_shape.append(f"{row.name}: has {len(row.clients)} client(s); expected "
+                              f"{MIN_CLIENTS_PER_EMPLOYEE}-{MAX_CLIENTS_PER_EMPLOYEE}.")
         for client in row.clients:
             counts[client] = counts.get(client, 0) + 1
     for client, count in sorted(counts.items()):
         if count < MIN_EMPLOYEES_PER_CLIENT:
-            errors.append(f'Client "{client}" is served by only {count} employee(s).')
+            team_shape.append(f'Client "{client}" is served by only {count} employee(s).')
+
+    # The schedule's own verdict, kept separate from the team's shape so that
+    # "did the generator obey the rules" can be answered on its own.
+    schedule_ok = not errors
+    if not accept_team_shape:
+        errors = errors + team_shape
 
     return {
         "ok": not errors,
+        "schedule_ok": schedule_ok,
         "errors": errors,
+        "team_shape": team_shape,
         "checked": {
             "employees": len(roster.rows),
             "clients": len(counts),

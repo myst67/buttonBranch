@@ -36,8 +36,12 @@ export interface UploadResult {
   employees: ParsedEmployee[];
   clients: string[];
   warnings: string[];
+  /** Arithmetic problems: no roster obeying rule 5 exists while these hold. */
   blockers: string[];
+  /** Rule 2 problems about the team's shape. A roster is still possible. */
+  advisories: string[];
   ready: boolean;
+  clean: boolean;
   training: TrainingReport;
 }
 
@@ -101,7 +105,11 @@ export interface GeneratedRoster {
   };
   validation: {
     ok: boolean;
+    /** Rules 3-5 on the produced schedule, independent of the team's shape. */
+    schedule_ok: boolean;
     errors: string[];
+    /** Rule 2 findings about the team that was fed in. */
+    team_shape: string[];
     checked: { employees: number; clients: number; days: number; client_shift_day_slots: number };
   };
 }
@@ -113,4 +121,6 @@ export interface GenerateOptions {
   time_limit_seconds?: number;
   min_per_client_shift?: number;
   balance_slack?: number;
+  /** Build even though the team breaks rule 2. Scheduling rules stay hard. */
+  accept_team_shape?: boolean;
 }

@@ -59,6 +59,12 @@ class SolverOptions:
     time_limit_seconds: float = 20.0
     seed: int = 42
     prefer_redundancy: bool = True
+    #: Accept a team whose *shape* breaks rule 2 - people outside the 2-4 client
+    #: range, or a client below the headcount floor - and build anyway. The
+    #: scheduling rules stay hard either way: only the checks that describe the
+    #: input rather than the schedule are waived. Coverage arithmetic is never
+    #: waived, because no schedule satisfying rule 5 exists when it fails.
+    accept_team_shape: bool = False
 
 
 @dataclass
@@ -72,17 +78,33 @@ class SolveResult:
 
 
 # ------------------------------------------------------------- checks -------
-def check_feasibility(employees: list[EmployeeInput], options: SolverOptions) -> list[str]:
-    """Cheap structural checks, so an impossible request fails with an
-    explanation instead of a timeout."""
-    problems: list[str] = []
+def classify_feasibility(employees: list[EmployeeInput], options: SolverOptions
+                         ) -> tuple[list[str], list[str]]:
+    """Split the structural checks into the two kinds they really are.
+
+    Returns ``(blocking, advisory)``.
+
+    *Blocking* problems are arithmetic: the numbers prove that no roster
+    obeying rule 5 exists, so building one anyway can only produce a sheet with
+    holes in it. A client needs ``min_per_client_shift`` people in each of the
+    four shifts before staggered week-offs can cover all seven days; below that
+    the client is uncovered on somebody's day off no matter how the solver
+    arranges things.
+
+    *Advisory* problems describe the shape of the team rather than the schedule
+    - an employee outside the 2-4 client range, a client under the headcount
+    floor. A roster over such a team can still satisfy every scheduling rule,
+    so these are reported but need not stop the build.
+    """
+    blocking: list[str] = []
+    advisory: list[str] = []
     if not employees:
-        return ["No employees were supplied."]
+        return ["No employees were supplied."], []
 
     by_client: dict[str, list[EmployeeInput]] = {}
     for employee in employees:
         if not MIN_CLIENTS_PER_EMPLOYEE <= len(employee.clients) <= MAX_CLIENTS_PER_EMPLOYEE:
-            problems.append(
+            advisory.append(
                 f"{employee.name}: has {len(employee.clients)} client(s); rule 2 requires "
                 f"{MIN_CLIENTS_PER_EMPLOYEE}-{MAX_CLIENTS_PER_EMPLOYEE}.")
         for client in employee.clients:
@@ -91,23 +113,30 @@ def check_feasibility(employees: list[EmployeeInput], options: SolverOptions) ->
     needed = options.min_per_client_shift * len(SHIFTS)
     for client, staff in sorted(by_client.items()):
         if len(staff) < MIN_EMPLOYEES_PER_CLIENT:
-            problems.append(
+            advisory.append(
                 f'Client "{client}": has {len(staff)} employees; rule 2 requires more than '
                 f"{MIN_EMPLOYEES_PER_CLIENT - 1}.")
         if len(staff) < needed:
-            problems.append(
+            blocking.append(
                 f'Client "{client}": has {len(staff)} employees but cover in all '
                 f"{len(SHIFTS)} shifts on all 7 days needs at least {needed} "
-                f"({options.min_per_client_shift} per shift, so week-offs can be staggered).")
+                f"({options.min_per_client_shift} per shift, so week-offs can be staggered). "
+                f"Give {needed - len(staff)} more of the team this client, or add people.")
             continue
         for shift in SHIFTS:
             eligible = sum(1 for e in staff if e.previous_shift != shift)
             if eligible < options.min_per_client_shift:
-                problems.append(
+                blocking.append(
                     f'Client "{client}", shift {shift}: only {eligible} of {len(staff)} people '
                     f"may take it (the others worked {shift} last month), but "
                     f"{options.min_per_client_shift} are needed.")
-    return problems
+    return blocking, advisory
+
+
+def check_feasibility(employees: list[EmployeeInput], options: SolverOptions) -> list[str]:
+    """Every structural problem, blocking or not, in one list."""
+    blocking, advisory = classify_feasibility(employees, options)
+    return blocking + advisory
 
 
 # -------------------------------------------------------------- solve -------
@@ -117,9 +146,13 @@ def solve_roster(employees: list[EmployeeInput], learner, options: Optional[Solv
     from ortools.sat.python import cp_model
 
     options = options or SolverOptions()
-    problems = check_feasibility(employees, options)
-    if problems:
-        raise InfeasibleRoster(problems)
+    blocking, advisory = classify_feasibility(employees, options)
+    # An advisory problem stops the build unless the caller has said it accepts
+    # the team as it stands. A blocking one always stops it: there is no roster
+    # to find, so proceeding would only mean returning a sheet with holes.
+    fatal = blocking if options.accept_team_shape else blocking + advisory
+    if fatal:
+        raise InfeasibleRoster(fatal)
 
     n = len(employees)
     clients = sorted({c for e in employees for c in e.clients})
@@ -150,6 +183,12 @@ def solve_roster(employees: list[EmployeeInput], learner, options: Optional[Solv
         off_scores.append(per_off)
 
     notes: list[str] = []
+    if advisory:
+        # Carried into the roster's metadata so a sheet built over a team that
+        # breaks rule 2 says so, rather than looking unconditionally clean.
+        notes.append(f"Built over a team with {len(advisory)} rule 2 exception(s), "
+                     f"accepted by the caller.")
+        notes.extend(advisory)
     slack = options.balance_slack
 
     # Balance is the only soft rule here, so it is the only thing worth relaxing.

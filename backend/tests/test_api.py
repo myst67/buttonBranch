@@ -169,3 +169,40 @@ def test_the_built_ui_is_found_in_either_dist_layout(tmp_path):
 
     (dist / "browser" / "index.html").write_text("current")
     assert find_ui_build(dist) == dist / "browser"     # current layout wins
+
+
+def _team_with_a_rule_2_exception(team):
+    """The same team with one person cut back to one client, chosen so no client
+    drops below the coverage floor - a rule 2 problem with the arithmetic intact."""
+    reduced = [{"employee": row["employee"], "client": list(row["client"]),
+                "last_month_shift": row["last_month_shift"]} for row in team]
+    counts = {}
+    for row in reduced:
+        for client in row["client"]:
+            counts[client] = counts.get(client, 0) + 1
+    for row in reduced:
+        if all(counts[c] > 8 for c in row["client"][1:]):
+            row["client"] = row["client"][:1]
+            return reduced, row["employee"]
+    raise AssertionError("no employee could be reduced without breaking coverage")
+
+
+def test_generate_refuses_a_rule_2_team_then_builds_it_when_accepted(
+        client, wide_workbook_bytes, team):
+    _upload(client, wide_workbook_bytes)
+    reduced, name = _team_with_a_rule_2_exception(team)
+    request = {"month": "2025-07", "time_limit_seconds": 2, "employees": reduced}
+
+    refused = client.post("/api/roster/generate", json=request)
+    assert refused.status_code == 422
+    assert any(name in reason for reason in refused.json()["detail"]["reasons"])
+
+    accepted = client.post("/api/roster/generate",
+                           json={**request, "accept_team_shape": True})
+    assert accepted.status_code == 200
+    body = accepted.json()
+    # The waiver covers the team's shape; every scheduling rule still holds.
+    assert body["validation"]["schedule_ok"], body["validation"]["errors"][:3]
+    assert body["validation"]["ok"], body["validation"]["errors"][:3]
+    assert any(name in entry for entry in body["validation"]["team_shape"])
+    assert min(entry["min"] for entry in body["coverage"]) >= 1
