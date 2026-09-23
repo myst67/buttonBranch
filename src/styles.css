@@ -68,6 +68,7 @@ input:focus { outline: 2px solid var(--accent-soft); border-color: var(--accent)
 .alert ul { margin: 6px 0 0 18px; padding: 0; }
 .alert.ok { background: var(--ok-soft); color: var(--ok); }
 .alert.error { background: var(--error-soft); color: var(--error); }
+.alert.warn { background: var(--warn-soft); color: var(--warn); }
 
 .muted { color: var(--muted); }
 .pill { display: inline-block; border-radius: 999px; padding: 1px 9px; font-size: 11.5px;

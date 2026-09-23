@@ -41,12 +41,35 @@
       </div>
     } @else {
       <div class="alert error">
-        <strong>This team cannot be rostered yet:</strong>
+        <strong>This team cannot be rostered:</strong>
         <ul>
           @for (blocker of parsed.blockers; track blocker) {
             <li>{{ blocker }}</li>
           }
         </ul>
+        <p>
+          These are arithmetic, not policy: a client needs two people in each of
+          the four shifts before staggered week-offs can cover all seven days.
+          Until the numbers add up there is no roster that satisfies rule 5, so
+          this cannot be waived. Give more of the team these clients, or add people.
+        </p>
+      </div>
+    }
+
+    @if (parsed.advisories.length) {
+      <div class="alert warn">
+        <strong>{{ parsed.advisories.length }} rule 2 exception(s) in this team:</strong>
+        <ul>
+          @for (advisory of parsed.advisories; track advisory) {
+            <li>{{ advisory }}</li>
+          }
+        </ul>
+        <p>
+          These describe the team, not the schedule. A roster over this team can
+          still obey every scheduling rule - tick
+          <em>Accept the team as it stands</em> below to build anyway. The
+          exceptions are carried onto the generated roster rather than hidden.
+        </p>
       </div>
     }
 

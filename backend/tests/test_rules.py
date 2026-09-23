@@ -109,3 +109,70 @@ def test_validation_catches_a_roster_that_breaks_a_rule(solved):
     report = validate(roster)
     assert not report["ok"]
     assert any(row.name in error for error in report["errors"])
+
+
+# -- accepting a team whose shape breaks rule 2 -------------------------------
+
+def _single_client(team):
+    """The same team with one person cut back to a single client.
+
+    The client they keep is chosen so that no client drops below the coverage
+    floor: the point of the fixture is a rule 2 problem on its own, with the
+    arithmetic still satisfiable.
+    """
+    reduced = [dict(row, client=list(row["client"])) for row in team]
+    counts = {}
+    for row in reduced:
+        for client in row["client"]:
+            counts[client] = counts.get(client, 0) + 1
+    for row in reduced:
+        if all(counts[c] > 8 for c in row["client"][1:]):
+            row["client"] = row["client"][:1]
+            return reduced, row["employee"]
+    raise AssertionError("no employee could be reduced without breaking coverage")
+
+
+def test_a_one_client_employee_blocks_by_default(team, learner):
+    reduced, name = _single_client(team)
+    with pytest.raises(InfeasibleRoster) as error:
+        solve_roster(_team_inputs(reduced), learner, FAST)
+    assert any(name in reason for reason in error.value.reasons)
+
+
+def test_accepting_the_team_shape_builds_a_roster_that_still_obeys_every_rule(team, learner):
+    reduced, name = _single_client(team)
+    options = SolverOptions(time_limit_seconds=2.0, accept_team_shape=True)
+
+    result = solve_roster(_team_inputs(reduced), learner, options)
+    roster = build_roster(result.assignments, "2025-07")
+    report = validate(roster, accept_team_shape=True)
+
+    # The waiver covers the input's shape, never the schedule.
+    assert report["schedule_ok"], report["errors"][:5]
+    assert report["ok"], report["errors"][:5]
+    assert any(name in entry for entry in report["team_shape"])
+    # The exception is recorded rather than silently dropped.
+    assert any(name in note for note in result.notes)
+
+
+def test_accepting_the_team_shape_does_not_waive_the_coverage_arithmetic(team, learner):
+    """A client too small to cover four shifts blocks either way: no roster obeying
+    rule 5 exists, so building one could only produce a sheet with holes."""
+    thin = [row for row in team if "Client F" not in row["client"]]
+    thin += [dict(row, client=list(row["client"])) for row in team
+             if "Client F" in row["client"]][:3]
+
+    for accept in (False, True):
+        options = SolverOptions(time_limit_seconds=2.0, accept_team_shape=accept)
+        with pytest.raises(InfeasibleRoster) as error:
+            solve_roster(_team_inputs(thin), learner, options)
+        assert any("Client F" in reason for reason in error.value.reasons)
+
+
+def test_classify_splits_the_two_kinds_of_problem(team):
+    from app.solver import classify_feasibility
+
+    reduced, name = _single_client(team)
+    blocking, advisory = classify_feasibility(_team_inputs(reduced), SolverOptions())
+    assert blocking == []
+    assert any(name in entry for entry in advisory)

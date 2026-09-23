@@ -53,6 +53,11 @@ class GenerateRequest(BaseModel):
     time_limit_seconds: float = Field(20.0, ge=1.0, le=300.0)
     min_per_client_shift: int = Field(MIN_PER_CLIENT_SHIFT, ge=1, le=20)
     balance_slack: int = Field(1, ge=0, le=50)
+    accept_team_shape: bool = Field(
+        False, description="Build even though the team breaks rule 2 - people outside "
+                           "the 2-4 client range, or a client under the headcount floor. "
+                           "The scheduling rules stay hard; only these input-shape checks "
+                           "are waived, and the exceptions are listed on the result.")
 
 
 @app.get("/api/health")

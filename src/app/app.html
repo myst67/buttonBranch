@@ -44,6 +44,16 @@
         <label for="limit">Time limit (s)</label>
         <input id="limit" name="limit" type="number" min="1" [(ngModel)]="options.time_limit_seconds">
       </div>
+      <div class="field checkbox">
+        <label for="acceptShape">
+          <input id="acceptShape" name="acceptShape" type="checkbox"
+                 [(ngModel)]="options.accept_team_shape">
+          Accept the team as it stands
+        </label>
+        <small>Builds even where rule 2 is broken - someone outside the 2-4 client
+          range, or a client under the headcount floor. The scheduling rules stay
+          hard, and the exceptions are listed on the finished roster.</small>
+      </div>
       <button type="button" class="button primary large" (click)="generate()" [disabled]="!canGenerate()">
         {{ generating() ? 'Solving...' : 'Generate roster' }}
       </button>
