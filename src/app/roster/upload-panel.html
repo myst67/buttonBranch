@@ -50,10 +50,40 @@
         <p>
           These are arithmetic, not policy: a client needs two people in each of
           the four shifts before staggered week-offs can cover all seven days.
-          Until the numbers add up there is no roster that satisfies rule 5, so
-          this cannot be waived. Give more of the team these clients, or add people.
+          Until the numbers add up, no roster satisfies rule 5 - tick
+          <em>Build with gaps</em> below to get the best roster this team allows,
+          with the uncovered days listed rather than hidden.
         </p>
       </div>
+    }
+
+    @if (parsed.gaps.moves.length) {
+      <details class="warnings" open>
+        <summary>How to close the gap without hiring</summary>
+        <p>{{ parsed.gaps.summary }}</p>
+        <table>
+          <thead>
+            <tr><th>Give this person</th><th>this client</th><th>Clients</th><th>Why them</th></tr>
+          </thead>
+          <tbody>
+            @for (move of parsed.gaps.moves; track move.employee + move.client) {
+              <tr>
+                <td>{{ move.employee }}</td>
+                <td>{{ move.client }}</td>
+                <td>{{ move.clients_before }} &rarr; {{ move.clients_after }}</td>
+                <td>{{ move.why }}</td>
+              </tr>
+            }
+          </tbody>
+        </table>
+        @if (parsed.gaps.unresolved.length) {
+          <ul>
+            @for (item of parsed.gaps.unresolved; track item) {
+              <li>{{ item }}</li>
+            }
+          </ul>
+        }
+      </details>
     }
 
     @if (parsed.advisories.length) {

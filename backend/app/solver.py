@@ -65,6 +65,19 @@ class SolverOptions:
     #: input rather than the schedule are waived. Coverage arithmetic is never
     #: waived, because no schedule satisfying rule 5 exists when it fails.
     accept_team_shape: bool = False
+    #: Build even when a client cannot be covered in every shift on every day.
+    #: The solver then minimises the number of uncovered client/shift/day slots
+    #: instead of requiring zero of them, and the ones it could not fill are
+    #: reported as gaps. Rules 3 and 4 stay hard: nobody works two shifts or
+    #: loses their week-off to plug a hole.
+    allow_coverage_gaps: bool = False
+
+    def __post_init__(self):
+        # Accepting gaps is the broader waiver: a caller willing to ship a sheet
+        # with uncovered days is not asking to be stopped by the team's shape.
+        # Enforced here so every entry point inherits it, not just the service.
+        if self.allow_coverage_gaps:
+            self.accept_team_shape = True
 
 
 @dataclass
@@ -95,6 +108,11 @@ def classify_feasibility(employees: list[EmployeeInput], options: SolverOptions
     - an employee outside the 2-4 client range, a client under the headcount
     floor. A roster over such a team can still satisfy every scheduling rule,
     so these are reported but need not stop the build.
+
+    With ``allow_coverage_gaps`` the arithmetic problems move to advisory too.
+    They are still true - those clients will have uncovered days - but the
+    caller has asked for the best roster available rather than none at all, so
+    they become something to report rather than something to refuse on.
     """
     blocking: list[str] = []
     advisory: list[str] = []
@@ -117,7 +135,7 @@ def classify_feasibility(employees: list[EmployeeInput], options: SolverOptions
                 f'Client "{client}": has {len(staff)} employees; rule 2 requires more than '
                 f"{MIN_EMPLOYEES_PER_CLIENT - 1}.")
         if len(staff) < needed:
-            blocking.append(
+            (advisory if options.allow_coverage_gaps else blocking).append(
                 f'Client "{client}": has {len(staff)} employees but cover in all '
                 f"{len(SHIFTS)} shifts on all 7 days needs at least {needed} "
                 f"({options.min_per_client_shift} per shift, so week-offs can be staggered). "
@@ -126,7 +144,7 @@ def classify_feasibility(employees: list[EmployeeInput], options: SolverOptions
         for shift in SHIFTS:
             eligible = sum(1 for e in staff if e.previous_shift != shift)
             if eligible < options.min_per_client_shift:
-                blocking.append(
+                (advisory if options.allow_coverage_gaps else blocking).append(
                     f'Client "{client}", shift {shift}: only {eligible} of {len(staff)} people '
                     f"may take it (the others worked {shift} last month), but "
                     f"{options.min_per_client_shift} are needed.")
@@ -274,16 +292,36 @@ def _solve_once(employees, clients, members, shift_scores, off_scores, options, 
             x[(i, shift)] = indicator
 
     # Rule 5: every client staffed in every shift, on every weekday.
+    #
+    # With allow_coverage_gaps the two coverage constraints gain a slack term
+    # rather than being dropped. The solver must then still cover everything it
+    # can - phase 0 minimises the slack - and what it could not cover is read
+    # back as the gap report instead of being silently absent.
     redundancy_terms = []
+    gap_terms = []
     for client, staff in members.items():
         for shift in SHIFTS:
             eligible = [i for i in staff if (i, shift) in x]
-            model.Add(sum(x[(i, shift)] for i in eligible) >= options.min_per_client_shift)
+            staffed = sum(x[(i, shift)] for i in eligible)
+            if options.allow_coverage_gaps:
+                short = model.NewIntVar(0, options.min_per_client_shift,
+                                        f"short_{client}_{shift}")
+                model.Add(staffed + short >= options.min_per_client_shift)
+                # Weighted below a whole uncovered day: being one body light on
+                # a shift is a thinner failure than leaving a day unstaffed.
+                gap_terms.append((short, 1))
+            else:
+                model.Add(staffed >= options.min_per_client_shift)
             off_length = OFF_DAYS_PER_WEEK[shift]
             for weekday in range(7):
                 on_duty = [z[(i, shift, k)] for i in eligible for k in range(7)
                            if works_on(k, off_length, weekday)]
-                model.Add(sum(on_duty) >= 1)
+                if options.allow_coverage_gaps:
+                    uncovered = model.NewBoolVar(f"gap_{client}_{shift}_{weekday}")
+                    model.Add(sum(on_duty) + uncovered >= 1)
+                    gap_terms.append((uncovered, 10))
+                else:
+                    model.Add(sum(on_duty) >= 1)
                 if options.prefer_redundancy:
                     spare = model.NewBoolVar(f"spare_{client}_{shift}_{weekday}")
                     model.Add(sum(on_duty) >= 2).OnlyEnforceIf(spare)
@@ -309,6 +347,18 @@ def _solve_once(employees, clients, members, shift_scores, off_scores, options, 
     solver = cp_model.CpSolver()
     solver.parameters.num_search_workers = 8
     solver.parameters.random_seed = options.seed
+
+    # -- phase 0: leave as few slots uncovered as this team allows ---------
+    # Coverage outranks preference, so it is settled first and then held: the
+    # learner may choose between equally-covered rosters, never buy a nicer
+    # score with somebody's client going unstaffed.
+    if gap_terms:
+        penalty = sum(weight * term for term, weight in gap_terms)
+        model.Minimize(penalty)
+        solver.parameters.max_time_in_seconds = options.time_limit_seconds
+        if solver.Solve(model) not in (cp_model.OPTIMAL, cp_model.FEASIBLE):
+            return None
+        model.Add(penalty <= int(round(solver.ObjectiveValue())))
 
     # -- phase 1: the best roster the learner can ask for ------------------
     model.Maximize(sum(preference))

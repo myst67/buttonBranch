@@ -206,3 +206,51 @@ def test_generate_refuses_a_rule_2_team_then_builds_it_when_accepted(
     assert body["validation"]["ok"], body["validation"]["errors"][:3]
     assert any(name in entry for entry in body["validation"]["team_shape"])
     assert min(entry["min"] for entry in body["coverage"]) >= 1
+
+
+def _team_too_thin_for_one_client(team, keep=3):
+    """Client F left with ``keep`` people - fewer than the 8 that covering four
+    shifts on seven days needs, so some day must go uncovered."""
+    thin = []
+    given = 0
+    for row in team:
+        clients = [c for c in row["client"] if c != "Client F"]
+        if given < keep and len(clients) < 4:
+            clients = clients + ["Client F"]
+            given += 1
+        if clients:
+            thin.append({"employee": row["employee"], "client": clients,
+                         "last_month_shift": row["last_month_shift"]})
+    return thin
+
+
+def test_generate_builds_through_a_coverage_gap_and_reports_it(
+        client, wide_workbook_bytes, team):
+    _upload(client, wide_workbook_bytes)
+    thin = _team_too_thin_for_one_client(team)
+    request = {"month": "2025-07", "time_limit_seconds": 5, "employees": thin}
+
+    refused = client.post("/api/roster/generate", json={**request, "accept_team_shape": True})
+    assert refused.status_code == 422
+    assert any("Client F" in reason for reason in refused.json()["detail"]["reasons"])
+
+    built = client.post("/api/roster/generate", json={**request, "allow_coverage_gaps": True})
+    assert built.status_code == 200
+    body = built.json()
+
+    # Rules 3 and 4 are never traded away to plug a hole.
+    assert body["validation"]["schedule_ok"], body["validation"]["errors"][:3]
+    assert body["validation"]["fully_covered"] is False
+    assert body["validation"]["coverage_gaps"]
+    assert all("Client F" in gap for gap in body["validation"]["coverage_gaps"])
+
+    # The sheet travels with what is missing and how to close it.
+    moves = body["meta"]["gaps"]["moves"]
+    assert any(move["client"] == "Client F" for move in moves)
+    assert all(move["clients_after"] <= 4 for move in moves)
+
+
+def test_upload_attaches_the_gap_report(client, wide_workbook_bytes):
+    body = _upload(client, wide_workbook_bytes).json()
+    assert body["gaps"]["ok"] is True
+    assert body["gaps"]["clients_short"] == []

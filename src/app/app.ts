@@ -35,6 +35,7 @@ export class App implements OnInit {
     min_per_client_shift: 2,
     balance_slack: 1,
     accept_team_shape: false,
+    allow_coverage_gaps: false,
   };
 
   protected readonly canGenerate = computed(

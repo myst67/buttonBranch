@@ -176,3 +176,71 @@ def test_classify_splits_the_two_kinds_of_problem(team):
     blocking, advisory = classify_feasibility(_team_inputs(reduced), SolverOptions())
     assert blocking == []
     assert any(name in entry for entry in advisory)
+
+
+# -- building through a coverage gap ------------------------------------------
+
+def _thin_client(team, keep=3):
+    """The team with Client F cut to ``keep`` people - below the 8 that covering
+    four shifts on seven days needs, so some day must go uncovered."""
+    thin = [dict(row, client=[c for c in row["client"] if c != "Client F"])
+            for row in team]
+    given = 0
+    for row in thin:
+        if given == keep:
+            break
+        if len(row["client"]) < 4:
+            row["client"] = row["client"] + ["Client F"]
+            given += 1
+    return [row for row in thin if row["client"]]
+
+
+def test_a_thin_client_still_refuses_unless_gaps_are_allowed(team, learner):
+    thin = _thin_client(team)
+    with pytest.raises(InfeasibleRoster):
+        solve_roster(_team_inputs(thin), learner, FAST)
+
+
+def test_allowing_gaps_builds_the_best_roster_the_team_allows(team, learner):
+    thin = _thin_client(team)
+    options = SolverOptions(time_limit_seconds=5.0, allow_coverage_gaps=True)
+
+    result = solve_roster(_team_inputs(thin), learner, options)
+    roster = build_roster(result.assignments, "2025-07")
+    report = validate(roster, accept_team_shape=True, accept_coverage_gaps=True)
+
+    # Rules 3 and 4 are never traded away to plug a hole.
+    assert report["schedule_ok"], report["errors"][:5]
+    # The thin client is the one that goes short, and it is named.
+    assert not report["fully_covered"]
+    assert all("Client F" in gap for gap in report["coverage_gaps"])
+    # Everything the team could cover, it did.
+    for entry in roster.coverage:
+        if entry.client != "Client F":
+            assert min(entry.per_day) >= 1, f"{entry.client}/{entry.shift} went short"
+
+
+def test_gaps_are_minimised_not_merely_permitted(team, learner):
+    """Allowing gaps must not licence the solver to leave more uncovered than
+    it has to: a team that can be fully covered still is."""
+    options = SolverOptions(time_limit_seconds=5.0, allow_coverage_gaps=True)
+
+    result = solve_roster(_team_inputs(team), learner, options)
+    roster = build_roster(result.assignments, "2025-07")
+    report = validate(roster, accept_team_shape=True, accept_coverage_gaps=True)
+
+    assert report["fully_covered"], report["coverage_gaps"][:5]
+    assert report["ok"], report["errors"][:5]
+
+
+def test_the_gap_report_names_the_fix(team):
+    from app.gaps import analyse
+
+    thin = _thin_client(team)
+    report = analyse(_team_inputs(thin), 2)
+
+    entry = next(c for c in report["clients_short"] if c["client"] == "Client F")
+    assert entry["short"] == entry["needed"] - entry["employees"]
+    moves = [m for m in report["moves"] if m["client"] == "Client F"]
+    assert len(moves) == entry["short"]
+    assert all(m["clients_after"] <= 4 for m in moves)

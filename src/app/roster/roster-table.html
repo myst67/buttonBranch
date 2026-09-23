@@ -32,6 +32,44 @@
       </div>
     }
 
+    @if (sheet.validation.coverage_gaps.length) {
+      <div class="alert error">
+        <strong>{{ sheet.validation.coverage_gaps.length }} client/shift/day slot(s)
+          could not be staffed:</strong>
+        <ul>
+          @for (gap of sheet.validation.coverage_gaps.slice(0, 12); track gap) {
+            <li>{{ gap }}</li>
+          }
+          @if (sheet.validation.coverage_gaps.length > 12) {
+            <li>and {{ sheet.validation.coverage_gaps.length - 12 }} more.</li>
+          }
+        </ul>
+        <p>{{ sheet.meta.gaps.summary }} The roster below is the most cover this
+          team allows - everyone still has one shift and a full week-off.</p>
+      </div>
+    }
+
+    @if (sheet.meta.gaps && sheet.meta.gaps.moves.length) {
+      <details class="warnings">
+        <summary>{{ sheet.meta.gaps.moves.length }} reassignment(s) would close the gap</summary>
+        <table>
+          <thead>
+            <tr><th>Give this person</th><th>this client</th><th>Clients</th><th>Why them</th></tr>
+          </thead>
+          <tbody>
+            @for (move of sheet.meta.gaps.moves; track move.employee + move.client) {
+              <tr>
+                <td>{{ move.employee }}</td>
+                <td>{{ move.client }}</td>
+                <td>{{ move.clients_before }} &rarr; {{ move.clients_after }}</td>
+                <td>{{ move.why }}</td>
+              </tr>
+            }
+          </tbody>
+        </table>
+      </details>
+    }
+
     @if (sheet.validation.ok && sheet.validation.team_shape.length) {
       <div class="alert warn">
         <strong>Built over {{ sheet.validation.team_shape.length }} rule 2

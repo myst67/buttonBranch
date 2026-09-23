@@ -54,6 +54,17 @@
           range, or a client under the headcount floor. The scheduling rules stay
           hard, and the exceptions are listed on the finished roster.</small>
       </div>
+      <div class="field checkbox">
+        <label for="allowGaps">
+          <input id="allowGaps" name="allowGaps" type="checkbox"
+                 [(ngModel)]="options.allow_coverage_gaps">
+          Build with gaps
+        </label>
+        <small>For a team too thin to staff every client in every shift. The solver
+          covers as much as it can and leaves the rest uncovered rather than
+          refusing - one shift per person and their full week-off are still
+          guaranteed. Every uncovered day is listed on the roster.</small>
+      </div>
       <button type="button" class="button primary large" (click)="generate()" [disabled]="!canGenerate()">
         {{ generating() ? 'Solving...' : 'Generate roster' }}
       </button>

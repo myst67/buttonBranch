@@ -58,6 +58,12 @@ class GenerateRequest(BaseModel):
                            "the 2-4 client range, or a client under the headcount floor. "
                            "The scheduling rules stay hard; only these input-shape checks "
                            "are waived, and the exceptions are listed on the result.")
+    allow_coverage_gaps: bool = Field(
+        False, description="Build the best roster this team allows even when some client "
+                           "cannot be staffed in every shift on every day. The solver "
+                           "minimises the uncovered slots rather than requiring none, and "
+                           "the ones left over come back under validation.coverage_gaps. "
+                           "Rules 3 and 4 stay hard. Implies accept_team_shape.")
 
 
 @app.get("/api/health")

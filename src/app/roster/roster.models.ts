@@ -29,6 +29,34 @@ export interface ParsedEmployee {
   off_length: number | null;
 }
 
+export interface GapMove {
+  employee: string;
+  client: string;
+  clients_before: number;
+  clients_after: number;
+  previous_shift: string | null;
+  why: string;
+}
+
+export interface ShortClient {
+  client: string;
+  employees: number;
+  needed: number;
+  short: number;
+  shifts_blocked: { shift: string; eligible: number; needed: number; note: string }[];
+}
+
+/** What the team cannot cover, and the smallest reassignment that would fix it. */
+export interface GapReport {
+  ok: boolean;
+  needed_per_client: number;
+  min_per_client_shift: number;
+  clients_short: ShortClient[];
+  moves: GapMove[];
+  unresolved: string[];
+  summary: string;
+}
+
 export interface UploadResult {
   month: string;
   month_label: string;
@@ -42,6 +70,7 @@ export interface UploadResult {
   advisories: string[];
   ready: boolean;
   clean: boolean;
+  gaps: GapReport;
   training: TrainingReport;
 }
 
@@ -102,6 +131,8 @@ export interface GeneratedRoster {
     balance_slack_used: number;
     notes: string[];
     training: TrainingReport;
+    /** What the team could not cover, and the reassignment that would fix it. */
+    gaps: GapReport;
   };
   validation: {
     ok: boolean;
@@ -110,6 +141,10 @@ export interface GeneratedRoster {
     errors: string[];
     /** Rule 2 findings about the team that was fed in. */
     team_shape: string[];
+    /** True when nothing was left uncovered, whether or not gaps were allowed. */
+    fully_covered: boolean;
+    /** Client/shift/day slots left unstaffed, when gaps were permitted. */
+    coverage_gaps: string[];
     checked: { employees: number; clients: number; days: number; client_shift_day_slots: number };
   };
 }
@@ -123,4 +158,6 @@ export interface GenerateOptions {
   balance_slack?: number;
   /** Build even though the team breaks rule 2. Scheduling rules stay hard. */
   accept_team_shape?: boolean;
+  /** Build the best roster this team allows, leaving the rest as reported gaps. */
+  allow_coverage_gaps?: boolean;
 }

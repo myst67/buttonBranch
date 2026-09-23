@@ -11,7 +11,8 @@ from .config import (MAX_CLIENTS_PER_EMPLOYEE, MIN_CLIENTS_PER_EMPLOYEE,
 from .roster import GeneratedRoster
 
 
-def validate(roster: GeneratedRoster, accept_team_shape: bool = False) -> dict:
+def validate(roster: GeneratedRoster, accept_team_shape: bool = False,
+             accept_coverage_gaps: bool = False) -> dict:
     """Re-check the produced roster against every rule.
 
     ``accept_team_shape`` moves the rule 2 findings - which describe the team
@@ -20,9 +21,16 @@ def validate(roster: GeneratedRoster, accept_team_shape: bool = False) -> dict:
     are checked identically either way, so a roster is never reported clean
     because of this flag; it only stops an input the generator cannot fix from
     masking whether the schedule itself is sound.
+
+    ``accept_coverage_gaps`` does the same for rule 5: a client with nobody on
+    duty on some day is listed as a gap rather than an error. It is still a
+    real hole in the sheet - the flag only says the caller asked for the best
+    roster this team allows instead of none at all, and gaps are counted and
+    named either way.
     """
     errors: list[str] = []
     team_shape: list[str] = []
+    coverage_gaps: list[str] = []
     days = roster.month.days
     day_count = len(days)
 
@@ -60,8 +68,9 @@ def validate(roster: GeneratedRoster, accept_team_shape: bool = False) -> dict:
     for entry in roster.coverage:
         for index, count in enumerate(entry.per_day):
             if count == 0:
-                errors.append(f'Client "{entry.client}" has nobody on {entry.shift} '
-                              f"on {days[index].label}.")
+                (coverage_gaps if accept_coverage_gaps else errors).append(
+                    f'Client "{entry.client}" has nobody on {entry.shift} '
+                    f"on {days[index].label}.")
 
     # Rule 2: the shape of the team, restated against the produced sheet.
     counts: dict[str, int] = {}
@@ -84,8 +93,12 @@ def validate(roster: GeneratedRoster, accept_team_shape: bool = False) -> dict:
     return {
         "ok": not errors,
         "schedule_ok": schedule_ok,
+        # Nothing was left uncovered: true even when gaps were permitted, which
+        # is how you tell "allowed gaps and had none" from "allowed and used them".
+        "fully_covered": not coverage_gaps,
         "errors": errors,
         "team_shape": team_shape,
+        "coverage_gaps": coverage_gaps,
         "checked": {
             "employees": len(roster.rows),
             "clients": len(counts),

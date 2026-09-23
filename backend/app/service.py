@@ -11,6 +11,7 @@ from typing import Optional
 from .calendar_utils import next_month
 from .config import EXPORT_DIR, HISTORY_DIR, MODEL_DIR, MIN_PER_CLIENT_SHIFT
 from .exporting import export_to_bytes, export_to_csv, export_to_file
+from .gaps import analyse as analyse_gaps
 from .history import HistoryStore
 from .ml import RosterLearner
 from .models import MonthRoster
@@ -87,6 +88,9 @@ class RosterService:
             "advisories": advisories,
             "ready": not blockers,
             "clean": not blockers and not advisories,
+            # What is missing and the smallest reassignment that would fix it,
+            # so a refused upload arrives with the answer attached.
+            "gaps": analyse_gaps(employees, MIN_PER_CLIENT_SHIFT),
             "training": self.model_report(),
         }
 
@@ -115,7 +119,8 @@ class RosterService:
                  time_limit_seconds: float = 20.0,
                  min_per_client_shift: int = MIN_PER_CLIENT_SHIFT,
                  balance_slack: int = 1,
-                 accept_team_shape: bool = False) -> GeneratedRoster:
+                 accept_team_shape: bool = False,
+                 allow_coverage_gaps: bool = False) -> GeneratedRoster:
         """Build the target month from the stored history (rule 1-6 guaranteed)."""
         base = self.store.load(source_month) if source_month else self.store.latest()
         if base is None and not employees:
@@ -136,7 +141,8 @@ class RosterService:
         options = SolverOptions(min_per_client_shift=min_per_client_shift,
                                 balance_slack=balance_slack, seed=seed,
                                 time_limit_seconds=time_limit_seconds,
-                                accept_team_shape=accept_team_shape)
+                                accept_team_shape=accept_team_shape or allow_coverage_gaps,
+                                allow_coverage_gaps=allow_coverage_gaps)
         result = solve_roster(team, self.learner, options)
 
         meta = {
@@ -148,9 +154,14 @@ class RosterService:
             "balance_slack_used": result.balance_slack_used,
             "notes": result.notes,
             "training": self.model_report(),
+            # Carried on the roster itself, so a sheet built through gaps always
+            # travels with what is missing and how to close it.
+            "gaps": analyse_gaps(team, min_per_client_shift),
         }
         roster = build_roster(result.assignments, target, meta)
-        roster.validation = validate(roster, accept_team_shape=accept_team_shape)
+        roster.validation = validate(roster,
+                                     accept_team_shape=accept_team_shape or allow_coverage_gaps,
+                                     accept_coverage_gaps=allow_coverage_gaps)
 
         roster_id = uuid.uuid4().hex[:12]
         roster.meta["id"] = roster_id
