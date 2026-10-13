@@ -1,1 +1,16 @@
-Resolution: Implemented the TH status lifecycle (Build → Testing / Tuning → Pending Client Approval → Approved → Deployed to Production) in Swimlane using workflow. Status now sets Rule Execution automatically, enforces required fields before Pending Client Approval, and locks the record as read-only in Approved and Deployed to Production. Old status branches were cleaned up, and the lifecycle was verified on a test record.
+Field	B	T	P	A	D
+Status	Edit	Edit	Edit	Edit	Edit
+Rule Execution	RO (Disabled)	RO (Enabled)	RO (Disabled)	RO (Disabled)	RO (Enabled)
+Title	Edit	Edit	Edit	RO	RO
+Execution Environment	Edit	Req	Req	RO	RO
+Threat Hunt Type	Edit	Req	Req	RO	RO
+Query Details	Edit	Req	Req	RO	RO
+Use Case Summary	Edit	Edit	Req	RO	RO
+Desired Alert Conditions	Edit	Edit	Req	RO	RO
+Investigation Steps	Edit	Edit	Req	RO	RO
+Escalation Conditions	Edit	Edit	Edit	RO	RO
+Known Tuning Exceptions	Edit	Edit	Edit	RO	RO
+Severity Details tab	Edit	Edit	Edit	RO	RO
+Associated CIM Records	Edit	Edit	Edit	Edit	Edit
+Reviews	Edit	Edit	Edit	Edit	Edit
+Audit	Edit	Edit	Edit	RO	RO
