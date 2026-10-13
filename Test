@@ -1,4 +1,4 @@
-Here's the updated sub-task for WM-13, ready to paste.
+Here's the updated sub-task, with the "who changed it and when" fields removed.
 
 Summary: Implement status lifecycle on TH records in Swimlane
 
@@ -10,7 +10,7 @@ As a detection engineer maintaining threat hunts in Swimlane, I want each TH rec
 
 Context
 
-The parent story notes the full TH process would benefit from lifecycle tracking in Swimlane, and that a hunt should be fully documented before it's enabled. TH records already have Status and Rule Execution (Enable/Disable) fields, but today any status can be chosen at any time, with no checks and no record of who changed it.
+The parent story notes the full TH process would benefit from lifecycle tracking in Swimlane, and that a hunt should be fully documented before it's enabled. TH records already have Status and Rule Execution (Enable/Disable) fields, but today any status can be chosen at any time, with no checks.
 
 Lifecycle:
 
@@ -29,7 +29,6 @@ Acceptance criteria
 
 	•	☐ New TH records default to Build.
 	•	☐ Rule Execution is read-only and set automatically from Status, per the table above.
-	•	☐ Whenever Status changes, Status Updated By (Swimlane user) and Status Updated On (date/time) are stamped automatically. Both fields are read-only.
 	•	☐ Required fields are enforced per status:
 	•	☐ Testing / Tuning: Execution Environment, Threat Hunt Type, Query Details
 	•	☐ Pending Client Approval: the above, plus Use Case Summary, Desired Alert Conditions, Investigation Steps
@@ -43,6 +42,7 @@ Acceptance criteria
 Other information
 
 	•	Implemented with Swimlane workflow only (conditions on Status, plus Set Value, Set Required and Set Read/Write actions). No new playbook.
-	•	Only the latest status change is stamped on the record. The full change history is available in Swimlane record history.
 	•	Enforcing the order of transitions (for example, blocking a jump from Build straight to Deployed) is out of scope for this sub-task and can be a follow-up.
 	•	Testing / Tuning enables the rule because it has to run to be tested. Revisit this if testing happens outside Swimlane.
+
+In the workflow, this also means dropping the "Status Has Been Modified" condition, and you can delete the Status Updated By / Client Approver field.
