@@ -1,0 +1,57 @@
+// Packs the KPI Dashboard copy (transfer/build/kpi-dashboard, made by rebrand.mjs) into a few
+// plain-text parts that survive copy and paste. Run from the repository root:
+//   node transfer/rebrand.mjs && node transfer/pack.mjs [kilobytes per part, default 200]
+// Format: [4-byte manifest length][manifest JSON][file bytes …] → gzip → base64,
+// wrapped at 76 columns and split into parts. Each part starts with "#" header lines
+// carrying its own SHA-256 so a bad paste can be traced to one part.
+
+import fs from 'node:fs';
+import path from 'node:path';
+import zlib from 'node:zlib';
+import crypto from 'node:crypto';
+
+const sha = (b) => crypto.createHash('sha256').update(b).digest('hex');
+const kb = Number(process.argv[2]) || 200;
+const outDir = path.resolve('transfer');
+const src = path.join(outDir, 'build', 'kpi-dashboard');
+if (!fs.existsSync(src)) throw new Error(`${src} is missing: run node transfer/rebrand.mjs first`);
+
+const files = [];
+(function walk(dir) {
+  for (const e of fs.readdirSync(dir, { withFileTypes: true }).sort((a, b) => a.name.localeCompare(b.name))) {
+    const p = path.join(dir, e.name);
+    if (e.isDirectory()) walk(p);
+    else files.push(path.relative(src, p).split(path.sep).join('/'));
+  }
+})(src);
+const manifest = [];
+const blobs = [];
+for (const p of files) {
+  const b = fs.readFileSync(path.join(src, p));
+  manifest.push({ p, n: b.length, h: sha(b) });
+  blobs.push(b);
+}
+const head = Buffer.from(JSON.stringify(manifest));
+const len = Buffer.alloc(4);
+len.writeUInt32BE(head.length);
+const raw = Buffer.concat([len, head, ...blobs]);
+const b64 = zlib.gzipSync(raw, { level: 9 }).toString('base64');
+
+const lines = b64.match(/.{1,76}/g);
+const perPart = Math.floor((kb * 1024) / 77);
+const total = Math.ceil(lines.length / perPart);
+const bundleHash = sha(raw);
+
+for (const f of fs.readdirSync(outDir)) if (/-part-\d+\.txt$/.test(f)) fs.unlinkSync(path.join(outDir, f));
+for (let i = 0; i < total; i++) {
+  const body = lines.slice(i * perPart, (i + 1) * perPart).join('\n');
+  const name = `kpi-dashboard-part-${String(i + 1).padStart(2, '0')}.txt`;
+  const header = [
+    `# KPI DASHBOARD BUNDLE part ${i + 1} of ${total}`,
+    `# part-sha256 ${sha(body.replace(/\s+/g, ''))}`,
+    `# bundle-sha256 ${bundleHash}`,
+    `# files ${files.length}`,
+  ].join('\n');
+  fs.writeFileSync(path.join(outDir, name), `${header}\n${body}\n`);
+}
+process.stdout.write(`${files.length} files, ${raw.length} bytes → ${b64.length} characters in ${total} parts of up to ${kb} KB in ${outDir}\n`);
