@@ -1,0 +1,590 @@
+{
+ "kind": "kpi-dashboard/dashboard",
+ "schemaVersion": 2,
+ "dashboard": {
+  "name": "SLA Dashboard",
+  "description": "Alert volume and SLA times (acknowledge, analysis, resolution) by log source, analyst, severity and alert type.",
+  "icon": "clock",
+  "tags": [
+   "sla",
+   "soc"
+  ],
+  "body": {
+   "schema_version": 2,
+   "pages": [
+    {
+     "id": "main",
+     "title": "SLA"
+    }
+   ],
+   "widgets": [
+    {
+     "widget_id": "w1",
+     "type": "line",
+     "title": "Alert Trend_Incident Volume (Current Week)",
+     "layout": {
+      "x": 0,
+      "y": 0,
+      "w": 12,
+      "h": 6,
+      "page": "main"
+     },
+     "query": {
+      "metric": "new_count",
+      "group_by": [
+       "detection_source"
+      ],
+      "vars": {
+       "window": "this_week",
+       "agg": "daily_sum"
+      }
+     },
+     "display": {
+      "area": true,
+      "stacked": true,
+      "top_n": 8,
+      "legend": "right"
+     },
+     "help": "New alerts per day this week, stacked by log source."
+    },
+    {
+     "widget_id": "w2",
+     "type": "donut",
+     "title": "SLA | Total Alerts in Previous 30 Days",
+     "layout": {
+      "x": 0,
+      "y": 6,
+      "w": 12,
+      "h": 5,
+      "page": "main"
+     },
+     "query": {
+      "metric": "new_count",
+      "group_by": [
+       "detection_source"
+      ],
+      "series": false,
+      "vars": {
+       "window": "last_30d"
+      }
+     },
+     "display": {
+      "total": true,
+      "top_n": 8,
+      "legend": "table"
+     },
+     "help": "Alerts created in the last 30 days and each log source's share."
+    },
+    {
+     "widget_id": "w3",
+     "type": "bar",
+     "title": "SOC Acknowledgement_Average (min)",
+     "layout": {
+      "x": 0,
+      "y": 11,
+      "w": 4,
+      "h": 6,
+      "page": "main"
+     },
+     "query": {
+      "metric": "sla_ack_min",
+      "group_by": [
+       "detection_source"
+      ],
+      "series": false
+     },
+     "display": {
+      "orientation": "horizontal",
+      "values": true,
+      "top_n": 8,
+      "target_line": false,
+      "legend": "none"
+     },
+     "help": "Average acknowledgement time per log source, in minutes."
+    },
+    {
+     "widget_id": "w4",
+     "type": "bar",
+     "title": "SOC Analysis_Average (min)",
+     "layout": {
+      "x": 4,
+      "y": 11,
+      "w": 4,
+      "h": 6,
+      "page": "main"
+     },
+     "query": {
+      "metric": "sla_analysis_min",
+      "group_by": [
+       "detection_source"
+      ],
+      "series": false
+     },
+     "display": {
+      "orientation": "horizontal",
+      "values": true,
+      "top_n": 8,
+      "target_line": false,
+      "legend": "none"
+     },
+     "help": "Average analysis time per log source, in minutes."
+    },
+    {
+     "widget_id": "w5",
+     "type": "bar",
+     "title": "SOC Resolution Time_Average (min)",
+     "layout": {
+      "x": 8,
+      "y": 11,
+      "w": 4,
+      "h": 6,
+      "page": "main"
+     },
+     "query": {
+      "metric": "sla_resolve_min",
+      "group_by": [
+       "detection_source"
+      ],
+      "series": false
+     },
+     "display": {
+      "orientation": "horizontal",
+      "values": true,
+      "top_n": 8,
+      "target_line": false,
+      "legend": "none"
+     },
+     "help": "Average resolution time per log source, in minutes."
+    },
+    {
+     "widget_id": "w6",
+     "type": "custom_code",
+     "title": "Acknowledgement SLA Per User",
+     "layout": {
+      "x": 0,
+      "y": 17,
+      "w": 4,
+      "h": 7,
+      "page": "main"
+     },
+     "queries": [
+      {
+       "id": "q1",
+       "metric": "sla_ack_min",
+       "group_by": [
+        "assignee_name"
+       ],
+       "series": false,
+       "top_n": 50
+      }
+     ],
+     "display": {
+      "bare": false
+     },
+     "code": {
+      "js": "slaClicks('assignee_name');\nKPI.onChange(function (data, ctx) { root.innerHTML = slaLine(data.q1, ctx, \"Acknowledgement SLA Per User\"); });",
+      "css": ".sla{width:100%;height:100%}.sla-svg{display:block}.sla-svg text{font:11px system-ui,sans-serif;fill:var(--text-secondary,#9aa3b2)}.sla-svg .t{fill:var(--text-primary,#e6e9ef);font-weight:600}.sla-svg .grid{stroke:var(--grid,rgba(148,163,184,.2))}.sla-svg .ln{fill:none;stroke:var(--series-2,#f5a524);stroke-width:2}.sla-svg .pt circle{fill:var(--series-2,#f5a524);cursor:pointer}.sla-svg .band{fill:none;stroke-opacity:.55;cursor:pointer}.sla-svg .band:hover{stroke-opacity:.9}.sla-svg .lbl{fill:var(--text-primary,#e6e9ef);font-weight:600}.sla-msg{display:flex;height:100%;align-items:center;justify-content:center;color:var(--text-muted,#8b93a7);font:13px system-ui,sans-serif}"
+     }
+    },
+    {
+     "widget_id": "w7",
+     "type": "custom_code",
+     "title": "Analysis SLA Per User",
+     "layout": {
+      "x": 4,
+      "y": 17,
+      "w": 4,
+      "h": 7,
+      "page": "main"
+     },
+     "queries": [
+      {
+       "id": "q1",
+       "metric": "sla_analysis_min",
+       "group_by": [
+        "assignee_name"
+       ],
+       "series": false,
+       "top_n": 50
+      }
+     ],
+     "display": {
+      "bare": false
+     },
+     "code": {
+      "js": "slaClicks('assignee_name');\nKPI.onChange(function (data, ctx) { root.innerHTML = slaLine(data.q1, ctx, \"Analysis SLA Per User\"); });",
+      "css": ".sla{width:100%;height:100%}.sla-svg{display:block}.sla-svg text{font:11px system-ui,sans-serif;fill:var(--text-secondary,#9aa3b2)}.sla-svg .t{fill:var(--text-primary,#e6e9ef);font-weight:600}.sla-svg .grid{stroke:var(--grid,rgba(148,163,184,.2))}.sla-svg .ln{fill:none;stroke:var(--series-2,#f5a524);stroke-width:2}.sla-svg .pt circle{fill:var(--series-2,#f5a524);cursor:pointer}.sla-svg .band{fill:none;stroke-opacity:.55;cursor:pointer}.sla-svg .band:hover{stroke-opacity:.9}.sla-svg .lbl{fill:var(--text-primary,#e6e9ef);font-weight:600}.sla-msg{display:flex;height:100%;align-items:center;justify-content:center;color:var(--text-muted,#8b93a7);font:13px system-ui,sans-serif}"
+     }
+    },
+    {
+     "widget_id": "w8",
+     "type": "custom_code",
+     "title": "Resolution SLA Per User",
+     "layout": {
+      "x": 8,
+      "y": 17,
+      "w": 4,
+      "h": 7,
+      "page": "main"
+     },
+     "queries": [
+      {
+       "id": "q1",
+       "metric": "sla_resolve_min",
+       "group_by": [
+        "assignee_name"
+       ],
+       "series": false,
+       "top_n": 50
+      }
+     ],
+     "display": {
+      "bare": false
+     },
+     "code": {
+      "js": "slaClicks('assignee_name');\nKPI.onChange(function (data, ctx) { root.innerHTML = slaLine(data.q1, ctx, \"Analyst Name\"); });",
+      "css": ".sla{width:100%;height:100%}.sla-svg{display:block}.sla-svg text{font:11px system-ui,sans-serif;fill:var(--text-secondary,#9aa3b2)}.sla-svg .t{fill:var(--text-primary,#e6e9ef);font-weight:600}.sla-svg .grid{stroke:var(--grid,rgba(148,163,184,.2))}.sla-svg .ln{fill:none;stroke:var(--series-2,#f5a524);stroke-width:2}.sla-svg .pt circle{fill:var(--series-2,#f5a524);cursor:pointer}.sla-svg .band{fill:none;stroke-opacity:.55;cursor:pointer}.sla-svg .band:hover{stroke-opacity:.9}.sla-svg .lbl{fill:var(--text-primary,#e6e9ef);font-weight:600}.sla-msg{display:flex;height:100%;align-items:center;justify-content:center;color:var(--text-muted,#8b93a7);font:13px system-ui,sans-serif}"
+     }
+    },
+    {
+     "widget_id": "w9",
+     "type": "bar",
+     "title": "Acknowledgement SLA Per Severity (min)",
+     "layout": {
+      "x": 0,
+      "y": 24,
+      "w": 4,
+      "h": 6,
+      "page": "main"
+     },
+     "query": {
+      "metric": "sla_ack_min",
+      "group_by": [
+       "severity"
+      ],
+      "series": false
+     },
+     "display": {
+      "orientation": "vertical",
+      "values": true,
+      "target_line": false,
+      "legend": "none"
+     },
+     "help": "Average acknowledgement time per severity, in minutes."
+    },
+    {
+     "widget_id": "w10",
+     "type": "bar",
+     "title": "Analysis SLA Per Severity (min)",
+     "layout": {
+      "x": 4,
+      "y": 24,
+      "w": 4,
+      "h": 6,
+      "page": "main"
+     },
+     "query": {
+      "metric": "sla_analysis_min",
+      "group_by": [
+       "severity"
+      ],
+      "series": false
+     },
+     "display": {
+      "orientation": "vertical",
+      "values": true,
+      "target_line": false,
+      "legend": "none"
+     },
+     "help": "Average analysis time per severity, in minutes."
+    },
+    {
+     "widget_id": "w11",
+     "type": "bar",
+     "title": "Resolution SLA Per Severity (min)",
+     "layout": {
+      "x": 8,
+      "y": 24,
+      "w": 4,
+      "h": 6,
+      "page": "main"
+     },
+     "query": {
+      "metric": "sla_resolve_min",
+      "group_by": [
+       "severity"
+      ],
+      "series": false
+     },
+     "display": {
+      "orientation": "vertical",
+      "values": true,
+      "target_line": false,
+      "legend": "none"
+     },
+     "help": "Average resolution time per severity, in minutes."
+    },
+    {
+     "widget_id": "w12",
+     "type": "donut",
+     "title": "SLA | SOC Acknowledgement Per Alert Type",
+     "layout": {
+      "x": 0,
+      "y": 30,
+      "w": 4,
+      "h": 6,
+      "page": "main"
+     },
+     "query": {
+      "metric": "sla_ack_min",
+      "group_by": [
+       "type"
+      ],
+      "series": false
+     },
+     "display": {
+      "pie": true,
+      "total": false,
+      "top_n": 8,
+      "legend": "right"
+     },
+     "help": "Average acknowledgement time per alert type, in minutes."
+    },
+    {
+     "widget_id": "w13",
+     "type": "donut",
+     "title": "SLA | Analysis SLA Per Alert Type",
+     "layout": {
+      "x": 4,
+      "y": 30,
+      "w": 4,
+      "h": 6,
+      "page": "main"
+     },
+     "query": {
+      "metric": "sla_analysis_min",
+      "group_by": [
+       "type"
+      ],
+      "series": false
+     },
+     "display": {
+      "pie": true,
+      "total": false,
+      "top_n": 8,
+      "legend": "right"
+     },
+     "help": "Average analysis time per alert type, in minutes."
+    },
+    {
+     "widget_id": "w14",
+     "type": "donut",
+     "title": "SLA | Resolution SLA Per Alert Type",
+     "layout": {
+      "x": 8,
+      "y": 30,
+      "w": 4,
+      "h": 6,
+      "page": "main"
+     },
+     "query": {
+      "metric": "sla_resolve_min",
+      "group_by": [
+       "type"
+      ],
+      "series": false
+     },
+     "display": {
+      "pie": true,
+      "total": false,
+      "top_n": 8,
+      "legend": "right"
+     },
+     "help": "Average resolution time per alert type, in minutes."
+    },
+    {
+     "widget_id": "w15",
+     "type": "custom_code",
+     "title": "SLA Per User Grouped By Severity",
+     "layout": {
+      "x": 0,
+      "y": 36,
+      "w": 12,
+      "h": 9,
+      "page": "main"
+     },
+     "queries": [
+      {
+       "id": "q1",
+       "metric": "new_count",
+       "group_by": [
+        "assignee_name",
+        "severity"
+       ],
+       "series": false,
+       "top_n": 200
+      }
+     ],
+     "display": {
+      "bare": false
+     },
+     "code": {
+      "js": "slaClicks('assignee_name');\nKPI.onChange(function (data, ctx) { root.innerHTML = slaSankey(data.q1, ctx); });",
+      "css": ".sla{width:100%;height:100%}.sla-svg{display:block}.sla-svg text{font:11px system-ui,sans-serif;fill:var(--text-secondary,#9aa3b2)}.sla-svg .t{fill:var(--text-primary,#e6e9ef);font-weight:600}.sla-svg .grid{stroke:var(--grid,rgba(148,163,184,.2))}.sla-svg .ln{fill:none;stroke:var(--series-2,#f5a524);stroke-width:2}.sla-svg .pt circle{fill:var(--series-2,#f5a524);cursor:pointer}.sla-svg .band{fill:none;stroke-opacity:.55;cursor:pointer}.sla-svg .band:hover{stroke-opacity:.9}.sla-svg .lbl{fill:var(--text-primary,#e6e9ef);font-weight:600}.sla-msg{display:flex;height:100%;align-items:center;justify-content:center;color:var(--text-muted,#8b93a7);font:13px system-ui,sans-serif}"
+     }
+    }
+   ],
+   "shared_code": {
+    "js": "var SLA_SEV = { critical: '#ef4444', high: '#f59e0b', medium: '#d946ef', low: '#a3e635', info: '#38bdf8', unknown: '#94a3b8' };\nfunction slaEsc(s) { return String(s === null || s === undefined ? '–' : s).replace(/[&<>\"]/g, function (c) { return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '\"': '&quot;' }[c]; }); }\nfunction slaMsg(t) { return '<div class=\"sla-msg\">' + slaEsc(t) + '</div>'; }\nfunction slaSize(ctx) { var s = (ctx && ctx.size) || KPI.size || {}; return { w: Math.max(240, s.w || root.clientWidth || 400), h: Math.max(160, s.h || root.clientHeight || 260) }; }\nfunction slaNice(v) { if (!(v > 0)) return 4; var raw = v / 4, p = Math.pow(10, Math.floor(Math.log10(raw))), f = raw / p; var step = (f <= 1 ? 1 : f <= 2 ? 2 : f <= 2.5 ? 2.5 : f <= 5 ? 5 : 10) * p; return Math.ceil(v / step) * step; }\nfunction slaNum(v) { return Math.round(v * 10) / 10; }\nfunction slaClicks(field) {\nroot.addEventListener('click', function (e) {\nvar t = e.target; while (t && t !== root && !(t.getAttribute && t.getAttribute('data-k'))) t = t.parentNode;\nif (t && t !== root) KPI.filter(t.getAttribute('data-f') || field, t.getAttribute('data-k'));\n});\n}\nfunction slaLine(res, ctx, xTitle) {\nif (!res || res.error) return slaMsg(res ? res.error : 'No data');\nvar g = (res.groups || []).filter(function (x) { return x.value !== null && x.value !== undefined && !x.other && x.key[0] !== null; });\ng.sort(function (a, b) { return b.value - a.value; });\nif (!g.length) return slaMsg('No data for this selection');\nvar sz = slaSize(ctx), W = sz.w, H = sz.h, L = 46, R = 12, T = 10, B = 74;\nvar pw = W - L - R, ph = H - T - B, max = slaNice(g[0].value * 1.05), n = g.length;\nvar x = function (i) { return L + ((i + 0.5) * pw) / n; };\nvar y = function (v) { return T + ph - (v / max) * ph; };\nvar s = '<svg class=\"sla-svg\" viewBox=\"0 0 ' + W + ' ' + H + '\" width=\"' + W + '\" height=\"' + H + '\">';\nfor (var k = 0; k <= 4; k++) {\nvar v = (max * k) / 4, yy = y(v);\ns += '<line class=\"grid\" x1=\"' + L + '\" x2=\"' + (W - R) + '\" y1=\"' + yy + '\" y2=\"' + yy + '\"/><text class=\"ax\" x=\"' + (L - 6) + '\" y=\"' + (yy + 4) + '\" text-anchor=\"end\">' + slaNum(v) + '</text>';\n}\ns += '<text class=\"ax t\" transform=\"translate(12 ' + (T + ph / 2) + ') rotate(-90)\" text-anchor=\"middle\">In Minutes</text>';\nvar pts = g.map(function (p, i) { return x(i) + ',' + y(p.value); }).join(' ');\ns += '<polyline class=\"ln\" points=\"' + pts + '\"/>';\ng.forEach(function (p, i) {\nvar lab = p.label || p.key[0];\ns += '<g class=\"pt\" data-k=\"' + slaEsc(p.key[0]) + '\"><circle cx=\"' + x(i) + '\" cy=\"' + y(p.value) + '\" r=\"3.5\"><title>' + slaEsc(lab) + ': ' + slaNum(p.value) + ' min</title></circle>';\ns += '<text class=\"ax\" transform=\"translate(' + x(i) + ' ' + (T + ph + 10) + ') rotate(-40)\" text-anchor=\"end\">' + slaEsc(String(lab).slice(0, 16)) + '</text></g>';\n});\ns += '<text class=\"ax t\" x=\"' + (L + pw / 2) + '\" y=\"' + (H - 4) + '\" text-anchor=\"middle\">' + slaEsc(xTitle) + '</text></svg>';\nreturn '<div class=\"sla\">' + s + '</div>';\n}\nfunction slaSankey(res, ctx) {\nif (!res || res.error) return slaMsg(res ? res.error : 'No data');\nvar g = (res.groups || []).filter(function (x) { return x.value > 0 && !x.other && x.key[0] !== null && x.key[1] !== null; });\nif (!g.length) return slaMsg('No data for this selection');\nvar left = {}, right = {}, total = 0;\ng.forEach(function (p) {\nvar a = String(p.key[0]), b = String(p.key[1]);\nleft[a] = left[a] || { key: a, label: (p.labels && p.labels[0]) || a, v: 0, off: 0 };\nright[b] = right[b] || { key: b, label: (p.labels && p.labels[1]) || b, v: 0, off: 0 };\nleft[a].v += p.value; right[b].v += p.value; total += p.value;\n});\nvar L = Object.keys(left).map(function (k) { return left[k]; }).sort(function (a, b) { return b.v - a.v; });\nvar Rn = Object.keys(right).map(function (k) { return right[k]; }).sort(function (a, b) { return Number(b.key) - Number(a.key) || (a.key < b.key ? -1 : 1); });\nvar sz = slaSize(ctx), W = sz.w, H = sz.h, T = 8, B = 8, NW = 12, gap = 4;\nvar lx = 8, rx = W - 8 - NW;\nvar scale = function (nodes) { return (H - T - B - gap * (nodes.length - 1)) / total; };\nvar sl = scale(L), sr = scale(Rn), k = Math.min(sl, sr);\nvar place = function (nodes) { var yy = T; nodes.forEach(function (nd) { nd.y = yy; nd.h = Math.max(1, nd.v * k); yy += nd.h + gap; }); };\nplace(L); place(Rn);\nvar colour = {}; L.forEach(function (nd, i) { colour[nd.key] = KPI.color(i); });\nvar sevColour = function (nd) { return SLA_SEV[String(nd.label).toLowerCase()] || KPI.color(Rn.indexOf(nd) + 3); };\ng.sort(function (a, b) { return L.indexOf(left[String(a.key[0])]) - L.indexOf(left[String(b.key[0])]) || Rn.indexOf(right[String(a.key[1])]) - Rn.indexOf(right[String(b.key[1])]); });\nvar s = '<svg class=\"sla-svg\" viewBox=\"0 0 ' + W + ' ' + H + '\" width=\"' + W + '\" height=\"' + H + '\">';\ng.forEach(function (p) {\nvar a = left[String(p.key[0])], b = right[String(p.key[1])], w = Math.max(1, p.value * k);\nvar y0 = a.y + a.off + w / 2, y1 = b.y + b.off + w / 2, x0 = lx + NW, x1 = rx, mx = (x0 + x1) / 2;\na.off += w; b.off += w;\ns += '<path class=\"band\" data-f=\"assignee_name\" data-k=\"' + slaEsc(a.key) + '\" d=\"M' + x0 + ' ' + y0 + ' C' + mx + ' ' + y0 + ' ' + mx + ' ' + y1 + ' ' + x1 + ' ' + y1 + '\" stroke=\"' + colour[a.key] + '\" stroke-width=\"' + w + '\"><title>' + slaEsc(a.label) + ' → ' + slaEsc(b.label) + ': ' + p.value + '</title></path>';\n});\nL.forEach(function (nd) {\ns += '<g data-f=\"assignee_name\" data-k=\"' + slaEsc(nd.key) + '\"><rect x=\"' + lx + '\" y=\"' + nd.y + '\" width=\"' + NW + '\" height=\"' + nd.h + '\" fill=\"' + colour[nd.key] + '\"/>';\nif (nd.h >= 10) s += '<text class=\"lbl\" x=\"' + (lx + NW + 6) + '\" y=\"' + (nd.y + nd.h / 2 + 4) + '\">' + slaEsc(nd.label) + ' (' + nd.v + ')</text>';\ns += '</g>';\n});\nRn.forEach(function (nd) {\ns += '<g data-f=\"severity\" data-k=\"' + slaEsc(nd.key) + '\"><rect x=\"' + rx + '\" y=\"' + nd.y + '\" width=\"' + NW + '\" height=\"' + nd.h + '\" fill=\"' + sevColour(nd) + '\"/>';\nif (nd.h >= 10) s += '<text class=\"lbl\" x=\"' + (rx - 6) + '\" y=\"' + (nd.y + nd.h / 2 + 4) + '\" text-anchor=\"end\">' + slaEsc(nd.label) + ' (' + nd.v + ')</text>';\ns += '</g>';\n});\nreturn '<div class=\"sla\">' + s + '</svg></div>';\n}"
+   },
+   "variables": [
+    {
+     "key": "window",
+     "type": "window",
+     "label": "Time",
+     "default": "this_month"
+    },
+    {
+     "key": "agg",
+     "type": "agg",
+     "label": "Aggregation",
+     "default": "total"
+    },
+    {
+     "key": "detection_source",
+     "type": "dimension",
+     "field": "detection_source",
+     "label": "Log source",
+     "multi": true
+    },
+    {
+     "key": "severity",
+     "type": "dimension",
+     "field": "severity",
+     "label": "Severity",
+     "multi": true
+    },
+    {
+     "key": "assignee_name",
+     "type": "dimension",
+     "field": "assignee_name",
+     "label": "Analyst",
+     "multi": true
+    },
+    {
+     "key": "type",
+     "type": "dimension",
+     "field": "type",
+     "label": "Alert type",
+     "multi": true
+    }
+   ],
+   "settings": {
+    "refresh_secs": 300,
+    "dataset": "incident",
+    "theme": {
+     "dark": {
+      "--series-1": "#c6f432",
+      "--series-2": "#f5a524",
+      "--series-3": "#1e88e5",
+      "--series-4": "#ff3b30",
+      "--series-5": "#e040fb",
+      "--series-6": "#22d3ee",
+      "--series-7": "#ffd60a",
+      "--series-8": "#8b5cf6"
+     },
+     "light": {
+      "--series-1": "#84cc16",
+      "--series-2": "#f59e0b",
+      "--series-3": "#1e88e5",
+      "--series-4": "#ef4444",
+      "--series-5": "#c026d3",
+      "--series-6": "#0891b2",
+      "--series-7": "#ca8a04",
+      "--series-8": "#7c3aed"
+     }
+    }
+   }
+  }
+ },
+ "references": {
+  "metrics": [
+   "new_count",
+   "sla_ack_min",
+   "sla_analysis_min",
+   "sla_resolve_min"
+  ],
+  "datasets": [
+   "incident"
+  ],
+  "packages": [],
+  "custom_metrics": [
+   {
+    "id": "sla_ack_min",
+    "body": {
+     "dataset": "incident",
+     "where": [],
+     "agg": "avg",
+     "format": "decimal",
+     "better": "lower",
+     "family": "SLA",
+     "id": "sla_ack_min",
+     "label": "Time to acknowledge",
+     "base": "new",
+     "value": {
+      "duration": [
+       "created_at",
+       "acknowledged_at"
+      ],
+      "unit": "minutes"
+     },
+     "help": "Average minutes from creation to first acknowledgement, over items created in the window."
+    }
+   },
+   {
+    "id": "sla_analysis_min",
+    "body": {
+     "dataset": "incident",
+     "where": [],
+     "agg": "avg",
+     "format": "decimal",
+     "better": "lower",
+     "family": "SLA",
+     "id": "sla_analysis_min",
+     "label": "Time to analyze",
+     "base": "closed",
+     "value": {
+      "duration": [
+       "acknowledged_at",
+       "resolved_at"
+      ],
+      "unit": "minutes"
+     },
+     "help": "Average minutes from acknowledgement to resolution, over items closed in the window."
+    }
+   },
+   {
+    "id": "sla_resolve_min",
+    "body": {
+     "dataset": "incident",
+     "where": [],
+     "agg": "avg",
+     "format": "decimal",
+     "better": "lower",
+     "family": "SLA",
+     "id": "sla_resolve_min",
+     "label": "Time to resolve",
+     "base": "closed",
+     "value": {
+      "duration": [
+       "created_at",
+       "resolved_at"
+      ],
+      "unit": "minutes"
+     },
+     "help": "Average minutes from creation to resolution, over items closed in the window."
+    }
+   }
+  ]
+ }
+}
