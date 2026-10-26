@@ -1,0 +1,764 @@
+// The analytics hub (/analytics/kpi/:metric), as Platform X's analytics hub page:
+//   Overview — the KPI's value on a focal date and its change since the start of the navigator's
+//     context; the navigator (about two years of the aggregation's steps, a brush selecting the
+//     range shown below it) with its range picker and aggregation; the range's statistics; the
+//     toolbar (Group by drawer, breakdown search, value filters, point labels, median, confidence
+//     band, forecast, Score / Δ / Δ% / YOY, line / area / bar, close); and the main chart, one
+//     series per value while a breakdown is expanded.
+//   Compare — the KPI split across one breakdown's segments over a range, each against the period
+//     before (dashed), with legend chips and a table of each segment's aggregates.
+// Opened from the sidebar (incidents created) or from a dashboard widget whose Analytics hub is on
+// (?agg= and ?date= carry the widget's aggregation and the clicked date). Every number comes from
+// POST /api/dash/query.
+
+import { h, mount, debounce } from '../lib/dom.js';
+import { icon } from '../lib/icons.js';
+import { get, post, errorText } from '../lib/api.js';
+import { setQuery, navigate } from '../lib/router.js';
+import { emptyState, errorBox, loading } from '../lib/ui.js';
+import { analyticsChart, colorsFor } from '/shared/charts.js';
+import { formatValue, esc } from '/shared/format.js';
+import { dayKey } from '/shared/time.js';
+import { SEVERITIES } from '/shared/canonical.js';
+import {
+  ensureCss, AGG_OPTIONS, aggOption, seriesQuery, aggSelect, datePicker, openPopover, closePopover,
+  shiftIso, longDate, shortDate,
+} from '../lib/analytics.js';
+
+const MON = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+const ISO_DAY = /^\d{4}-\d{2}-\d{2}$/;
+const FOCAL_PAD_DAYS = 15;
+// the navigator's context, and the default selection inside it (the last N steps), per step
+const CONTEXT_DAYS = { day: 730, week: 730, month: 1095, quarter: 1460 };
+const SEL_BUCKETS = { day: 15, week: 12, month: 6, quarter: 4 };
+const MEASURE_COLOR = { score: 'var(--series-1)', delta: 'var(--series-2)', pct: 'var(--series-3)', yoy: 'var(--series-7)' };
+
+const isNum = (v) => v !== null && v !== undefined && Number.isFinite(v);
+const svg = (paths, extra = '') => h('span', { html: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" ${extra}>${paths}</svg>` });
+const ICONS = {
+  labels: () => svg('<path d="M20.5 13.5l-7 7a2 2 0 0 1-2.8 0l-7.2-7.2V4h9.3l7.7 7.7a1.3 1.3 0 0 1 0 1.8z"/><circle cx="8" cy="8" r="1.4"/>'),
+  median: () => svg('<path d="M2 12h4M18 12h4"/><rect x="6" y="8" width="12" height="8" rx="1.5"/><path d="M12.5 8v8" stroke-width="2.6"/>'),
+  band: () => svg('<rect x="3" y="7" width="18" height="10" rx="2" fill="currentColor" stroke="none" opacity=".2"/><path d="M3 8h18M3 16h18" stroke-dasharray="3 2.5"/><path d="M3 12h18"/>'),
+  forecast: () => svg('<path d="M3 16l5-4 3 2"/><path d="M11 14l6-5" stroke-dasharray="3 2.5"/><path d="M14 8.5h3.5V12"/>'),
+  score: () => svg('<path d="M5 16a7 7 0 1 1 14 0"/><path d="M12 16l3.5-3.5"/><circle cx="12" cy="16" r="1.2" fill="currentColor" stroke="none"/>'),
+  line: () => svg('<path d="M3 16l5-5 4 3 7-8"/>'),
+  area: () => svg('<path d="M3 16l5-5 4 3 7-8V20H3z" fill="currentColor" fill-opacity=".25" stroke="none"/><path d="M3 16l5-5 4 3 7-8"/>'),
+  bar: () => svg('<rect x="4" y="12" width="3.6" height="8" rx="1" fill="currentColor" stroke="none"/><rect x="10.2" y="6" width="3.6" height="14" rx="1" fill="currentColor" stroke="none"/><rect x="16.4" y="9" width="3.6" height="11" rx="1" fill="currentColor" stroke="none"/>'),
+  close: () => svg('<path d="M6 6l12 12M18 6L6 18"/>', 'stroke-width="2"'),
+};
+
+function mean(a) { return a.length ? a.reduce((s, x) => s + x, 0) / a.length : 0; }
+function median(a) {
+  if (!a.length) return 0;
+  const s = [...a].sort((x, y) => x - y);
+  const m = Math.floor(s.length / 2);
+  return s.length % 2 ? s[m] : (s[m - 1] + s[m]) / 2;
+}
+function std(a, mu = mean(a)) {
+  if (a.length < 2) return 0;
+  return Math.sqrt(a.reduce((s, x) => s + (x - mu) ** 2, 0) / a.length);
+}
+/** Least-squares line through the points, carried `count` steps on (never below zero). */
+function forecast(vals, count) {
+  const n = vals.length;
+  const mx = (n - 1) / 2, my = mean(vals);
+  let num = 0, den = 0;
+  for (let i = 0; i < n; i++) { num += (i - mx) * (vals[i] - my); den += (i - mx) ** 2; }
+  const b = den ? num / den : 0;
+  return Array.from({ length: count }, (_, k) => Math.max(0, Math.round((my - b * mx + b * (n + k)) * 10) / 10));
+}
+const r1 = (v) => Math.round(v * 10) / 10;
+/** Change from a base as Platform X words it: a base of 0 that grew is +100 %. */
+const pctFrom = (cur, base) => (base ? r1(((cur - base) / base) * 100) : cur ? 100 : 0);
+
+export default async function kpi(container, params, query) {
+  ensureCss();
+  mount(container, loading());
+  let metricId = params.metric;
+  let hub;
+  try {
+    hub = await get('/api/dash/hub');
+  } catch (e) {
+    return mount(container, errorBox(e));
+  }
+  let meta = (hub.metrics || []).find((m) => m.id === metricId);
+  if (!meta) return mount(container, emptyState('target', 'KPI not found', `This tenant has no metric '${metricId}'.`, h('a', { class: 'btn', href: '/dashboards' }, 'Back to dashboards')));
+  const tz = hub.timezone || 'UTC';
+  const dims = hub.dimensions || [];
+  const dimOf = (k) => dims.find((d) => d.key === k);
+  const dimLabel = (k) => dimOf(k)?.label || k;
+  const fmt = (v) => formatValue(v, meta.format, { unit: meta.unit });
+  const today = () => dayKey(Date.now(), tz);
+
+  const S = {
+    tab: query.get('tab') === 'compare' ? 'compare' : 'overview',
+    agg: AGG_OPTIONS.some((o) => o.value === query.get('agg')) ? query.get('agg') : 'daily_sum',
+    dateFrom: '', dateTo: '', focal: '',
+    filters: [], // [{ dim, key, label }]: values of one breakdown OR'd, breakdowns AND'd
+    groupBy: '', drawer: false, q: '',
+    score: true, delta: false, pct: false, yoy: false,
+    labels: false, median: false, band: false, forecast: false,
+    chartType: 'area',
+    hidden: new Set(),
+    cmpDim: dims[0]?.key || 'severity', cmpPrev: true, cmpFrom: shiftIso(today(), -29), cmpTo: today(),
+    cmpHidden: new Set(),
+  };
+  // a dashboard chart click deep-links a date: focus it and centre the range on it once
+  const date = query.get('date');
+  if (ISO_DAY.test(date || '')) {
+    S.focal = date;
+    S.dateFrom = shiftIso(date, -FOCAL_PAD_DAYS);
+    const to = shiftIso(date, FOCAL_PAD_DAYS);
+    S.dateTo = to > today() ? today() : to;
+  }
+
+  let full = []; // [{ date, to, value }] over the navigator's context
+  let ctxError = null;
+  let sel = [0, 0];
+  let grouped = []; // [{ id, key, label, color, byDate: { date: value } }]
+  let cmp = null;
+  let searchHits = null;
+  let seq = 0, cmpSeq = 0, loaded = false;
+  const bucket = () => aggOption(S.agg).bucket;
+
+  function filterSpecs(list) {
+    const byDim = new Map();
+    for (const f of list) {
+      if (!byDim.has(f.dim)) byDim.set(f.dim, []);
+      byDim.get(f.dim).push(f.key);
+    }
+    return [...byDim].map(([field, keys]) => {
+      const vals = keys.filter((k) => k !== null && k !== undefined);
+      if (vals.length === keys.length) return { field, op: 'in', value: vals };
+      return vals.length ? { any: [{ field, op: 'in', value: vals }, { field, op: 'isNull' }] } : { field, op: 'isNull' };
+    });
+  }
+  const pointOf = (b, p) => ({ date: dayKey(Date.parse(b.s), tz), to: dayKey(Date.parse(b.e) - 1, tz), value: isNum(p?.value) ? p.value : null });
+  function rowsOf(res) {
+    const dim = res.dimensions?.[0]?.key;
+    const keys = (res.groups || []).map((g) => (dim === 'severity' ? String(g.label).toLowerCase() : String(g.key?.[0] ?? '(none)')));
+    const colors = colorsFor(keys, dim);
+    return (res.groups || []).map((g, i) => ({
+      id: JSON.stringify(g.key?.[0] ?? null), key: g.key?.[0] ?? null, label: g.label, color: colors[keys[i]],
+      series: (res.buckets || []).map((b, k) => pointOf(b, g.series?.[k])),
+    }));
+  }
+
+  // ---------------------------------------------------------------- data
+  function contextWindow() {
+    const t = today();
+    let from = shiftIso(t, -(CONTEXT_DAYS[bucket()] || 730));
+    if (S.dateFrom && S.dateFrom < from) from = S.dateFrom;
+    return seriesQuery(S.agg, { from, to: t }, tz);
+  }
+
+  async function load() {
+    const my = ++seq;
+    setBusy(true);
+    const { agg, window } = contextWindow();
+    const queries = [{ id: 'ctx', metric: metricId, vars: { window, agg }, filters: filterSpecs(S.filters) }];
+    // the breakdown keeps filters on other breakdowns, not on its own (its other values stay pickable)
+    if (S.groupBy) queries.push({ id: 'grp', metric: metricId, group_by: [S.groupBy], vars: { window, agg }, filters: filterSpecs(S.filters.filter((f) => f.dim !== S.groupBy)), other: false });
+    try {
+      const res = await post('/api/dash/query', { queries });
+      if (my !== seq) return;
+      const r = res.results?.ctx;
+      if (!r || r.error) { full = []; ctxError = r?.error || 'No result'; }
+      else {
+        ctxError = null;
+        full = (r.buckets || []).map((b, i) => pointOf(b, r.series?.[i]));
+      }
+      const g = res.results?.grp;
+      grouped = S.groupBy && g && !g.error ? rowsOf(g).map((x) => ({ ...x, byDate: Object.fromEntries(x.series.map((p) => [p.date, p.value])) })) : [];
+      S.hidden = new Set();
+      loaded = true;
+      applySelection();
+    } catch (e) {
+      if (my !== seq) return;
+      full = [];
+      ctxError = errorText(e);
+    }
+    setBusy(false);
+    renderOverview();
+  }
+
+  const idxForIso = (iso) => {
+    let idx = 0;
+    for (let i = 0; i < full.length; i++) { if (full[i].date <= iso) idx = i; else break; }
+    return idx;
+  };
+  /** The brush: the picked range, else the aggregation's default span (the last N steps). */
+  function applySelection() {
+    const n = full.length;
+    if (!n) { sel = [0, 0]; return; }
+    let a, b;
+    if (S.dateFrom && S.dateTo) { a = idxForIso(S.dateFrom); b = idxForIso(S.dateTo); }
+    else {
+      const selN = S.agg === 'total' ? n : SEL_BUCKETS[bucket()] || n;
+      a = Math.max(0, n - selN);
+      b = n - 1;
+    }
+    a = Math.max(0, Math.min(a, n - 1));
+    b = Math.max(a, Math.min(b, n - 1));
+    sel = [a, b];
+  }
+
+  async function loadCompare() {
+    const my = ++cmpSeq;
+    setBusy(true);
+    const dim = S.cmpDim;
+    const o = aggOption(S.agg);
+    const agg = `${{ day: 'daily', week: 'weekly', month: 'monthly', quarter: 'quarterly' }[o.bucket]}_${S.agg.endsWith('_avg') ? 'avg' : 'sum'}`;
+    const days = Math.round((Date.parse(S.cmpTo) - Date.parse(S.cmpFrom)) / 86400000) + 1;
+    const prevTo = shiftIso(S.cmpFrom, -1);
+    const base = { metric: metricId, group_by: [dim], other: false };
+    try {
+      const res = await post('/api/dash/query', { queries: [
+        { id: 'cur', ...base, vars: { window: { from: S.cmpFrom, to: S.cmpTo }, agg } },
+        { id: 'prev', ...base, vars: { window: { from: shiftIso(prevTo, -(days - 1)), to: prevTo }, agg } },
+      ] });
+      if (my !== cmpSeq) return;
+      const cur = res.results?.cur, prev = res.results?.prev;
+      if (!cur || cur.error) cmp = { dim, dates: [], groups: [], error: cur?.error || 'No result' };
+      else {
+        const prevById = new Map(prev && !prev.error ? rowsOf(prev).map((g) => [g.id, g.series]) : []);
+        const dates = (cur.buckets || []).map((b) => dayKey(Date.parse(b.s), tz));
+        // the previous period is lined up step for step with the current one
+        cmp = { dim, dates, groups: rowsOf(cur).map((g) => ({ ...g, prev: dates.map((_, i) => prevById.get(g.id)?.[i]?.value ?? 0) })) };
+      }
+    } catch (e) {
+      if (my !== cmpSeq) return;
+      cmp = { dim, dates: [], groups: [], error: errorText(e) };
+    }
+    setBusy(false);
+    renderCompare();
+  }
+
+  // ---------------------------------------------------------------- labels
+  /** First of a month shows the month, any other day its number. */
+  function axisLabel(iso) {
+    const [, m, d] = iso.split('-').map(Number);
+    return d === 1 ? MON[m - 1] : String(d);
+  }
+
+  // ---------------------------------------------------------------- KPI picker
+  /** The KPI name is a picker: the hub's KPIs first, then the tenant's other metrics. */
+  function kpiPicker(crumb = null) {
+    const list = hub.metrics || [];
+    const opt = (m) => h('option', { value: m.id, selected: m.id === metricId }, m.label);
+    const kpis = list.filter((m) => m.key), others = list.filter((m) => !m.key);
+    return h('div', { class: 'an-kpi-name' },
+      h('select', { class: 'an-kpi-pick', title: 'Change KPI', 'aria-label': 'KPI', onchange: (e) => switchKpi(e.target.value) },
+        kpis.length ? h('optgroup', { label: 'KPIs' }, kpis.map(opt)) : null,
+        others.length ? h('optgroup', { label: 'Other metrics' }, others.map(opt)) : null),
+      crumb);
+  }
+  /** Another KPI under the same settings: range, aggregation, focal date, filters, breakdown, chart options. */
+  function switchKpi(id) {
+    const next = (hub.metrics || []).find((m) => m.id === id);
+    if (!next || id === metricId) return;
+    metricId = id;
+    meta = next;
+    history.replaceState({}, '', `/analytics/kpi/${encodeURIComponent(id)}${location.search}`);
+    loaded = false;
+    cmp = null;
+    renderShell();
+    if (S.tab === 'compare') loadCompare();
+    else load();
+  }
+
+  // ---------------------------------------------------------------- shell
+  const root = h('div', { class: 'an' });
+  const body = h('div');
+  mount(container, root);
+  function setBusy(on) { root.classList.toggle('an-busy', !!on); }
+  function setTab(tab) {
+    if (S.tab === tab) return;
+    S.tab = tab;
+    setQuery({ tab });
+    renderShell();
+    if (tab === 'compare') loadCompare();
+    else if (!loaded) load();
+  }
+  function renderShell() {
+    mount(root,
+      h('div', { class: 'an-hero' },
+        h('div', { class: 'an-hero-left' }, h('div', { class: 'an-title' }, 'Analytics hub')),
+        h('div', { class: 'an-tabs', role: 'tablist' }, [['overview', 'Overview'], ['compare', 'Compare']].map(([k, label]) => h('button', {
+          type: 'button', role: 'tab', class: ['an-tab', S.tab === k && 'active'], 'aria-selected': String(S.tab === k), onclick: () => setTab(k),
+        }, label)))),
+      body);
+    if (S.tab === 'overview') renderOverview();
+    else renderCompare();
+  }
+
+  // ---------------------------------------------------------------- overview
+  const els = {};
+  const visible = () => (full.length ? full.slice(sel[0], sel[1] + 1) : []);
+  function focalIdx() {
+    if (!full.length) return -1;
+    if (S.focal) { const i = full.findIndex((p) => p.date <= S.focal && S.focal <= p.to); if (i >= 0) return i; }
+    return full.length - 1;
+  }
+  const showBreakdown = () => !!S.groupBy && !S.filters.some((f) => f.dim === S.groupBy);
+  const filterLabel = (f) => `${dimLabel(f.dim)}: ${f.label}`;
+
+  function renderOverview() {
+    if (S.tab !== 'overview') return;
+    els.head = h('section', { class: 'an-head' });
+    els.toolbar = h('section', { class: 'an-toolbar' });
+    els.drawer = h('aside', { class: ['an-drawer', S.drawer && 'open'] });
+    els.legend = h('div', { class: 'an-legend' });
+    els.chart = h('div', { class: 'an-chart' });
+    mount(body, els.head, els.toolbar, h('section', { class: 'an-main' }, els.drawer, h('div', { class: 'an-chart-col' }, els.legend, els.chart)));
+    renderHead();
+    renderToolbar();
+    renderDrawer();
+    renderMain();
+  }
+
+  function renderHead() {
+    if (!els.head) return;
+    if (ctxError) return mount(els.head, h('div', { class: 'callout bad' }, `The engine could not read this KPI: ${ctxError}`));
+    const fi = focalIdx();
+    const cur = fi >= 0 ? full[fi].value : 0;
+    // the change of the focal value since the start of the context
+    const first = full.length ? full[0].value || 0 : 0;
+    const change = isNum(cur) ? cur - first : 0;
+    const kpiCol = h('div', { class: 'an-kpi-col' });
+    const focalBtn = h('button', { class: 'an-link', type: 'button', title: 'Pick a date', 'data-pop-keep': '',
+      onclick: () => openPopover(kpiCol, datePicker({ mode: 'single', granularity: aggOption(S.agg).gran, start: S.focal || S.dateFrom, end: S.focal || S.dateTo,
+        onApply: (r) => { closePopover(); S.focal = r.start; renderHead(); renderMain(); renderDrawer(); }, onClose: closePopover }), 'focal') },
+    S.focal ? longDate(S.focal) : fi >= 0 ? longDate(full[fi].date) : 'Pick a date', h('span', { class: 'an-caret' }, '▾'));
+    mount(kpiCol,
+      kpiPicker(S.filters.length ? h('span', { class: 'an-crumbf' }, ` › ${S.filters.map(filterLabel).join(', ')}`) : null),
+      focalBtn,
+      h('div', { class: 'an-value-row' },
+        h('span', { class: 'an-value' }, fmt(cur)),
+        change ? h('span', { class: ['an-trend', change > 0 ? 'up' : 'down'] }, `${change > 0 ? '▲' : '▼'} ${fmt(Math.abs(change))} (${Math.abs(pctFrom(cur, first))}%)`) : null));
+
+    const navCol = h('div', { class: 'an-nav-col' });
+    els.navRange = h('button', { class: 'an-link accent', type: 'button', title: 'Change date range', 'data-pop-keep': '',
+      onclick: () => openPopover(navCol, datePicker({ mode: 'range', granularity: aggOption(S.agg).gran, start: S.dateFrom, end: S.dateTo,
+        onApply: (r) => { closePopover(); S.dateFrom = r.start; S.dateTo = r.end; load(); }, onClose: closePopover }), 'range') });
+    els.nav = h('div', { class: 'an-nav', role: 'slider', 'aria-label': 'Range', tabindex: '0' });
+    els.stats = h('div', { class: 'an-stats' });
+    mount(navCol,
+      h('div', { class: 'an-nav-hd' }, els.navRange, aggSelect(S.agg, (v) => {
+        S.agg = v;
+        // a new granularity drops the picked range: the default span applies
+        S.dateFrom = '';
+        S.dateTo = '';
+        load();
+      })),
+      els.nav, els.stats);
+    mount(els.head, h('div', { class: 'an-head-grid' }, kpiCol, navCol));
+    bindNav();
+    renderSelection();
+  }
+
+  // ---- navigator
+  let drag = null;
+  function navGeom() {
+    const W = Math.max(200, els.nav.clientWidth || 600);
+    const n = full.length;
+    return { W, n, X: (i) => (n <= 1 ? W / 2 : 10 + (i / (n - 1)) * (W - 20)), I: (x) => (n <= 1 ? 0 : Math.max(0, Math.min(n - 1, Math.round(((x - 10) / (W - 20)) * (n - 1))))) };
+  }
+  function drawNav() {
+    if (!els.nav) return;
+    const { W, n, X } = navGeom();
+    if (!n) return mount(els.nav);
+    const top = 4, bot = 54;
+    const vals = full.map((p) => p.value);
+    const finite = vals.filter(isNum);
+    const mn = Math.min(0, ...finite), mx = Math.max(0, ...finite) || 1;
+    const Y = (v) => bot - ((v - mn) / (mx - mn || 1)) * (bot - top - 4);
+    const path = (from, to) => {
+      let d = '', pen = false;
+      for (let i = from; i <= to; i++) {
+        if (!isNum(vals[i])) { pen = false; continue; }
+        d += `${pen ? 'L' : 'M'}${X(i).toFixed(1)},${Y(vals[i]).toFixed(1)}`;
+        pen = true;
+      }
+      return d;
+    };
+    const [a, b] = sel;
+    const xa = X(a), xb = Math.max(X(b), xa + 2);
+    const handle = (x, side) => `<g data-nv="${side}"><rect class="nv-handle" x="${(x - 5).toFixed(1)}" y="${top + 12}" width="10" height="28" rx="3"/><line class="nv-grip" x1="${(x - 1.5).toFixed(1)}" x2="${(x - 1.5).toFixed(1)}" y1="${top + 20}" y2="${top + 32}"/><line class="nv-grip" x1="${(x + 1.5).toFixed(1)}" x2="${(x + 1.5).toFixed(1)}" y1="${top + 20}" y2="${top + 32}"/></g>`;
+    const la = shortDate(full[a].date), lb = shortDate(full[b].date);
+    const labels = xb - xa < 90
+      ? `<text class="nv-label" x="${Math.min(W - 2, Math.max(2, (xa + xb) / 2)).toFixed(1)}" y="68" text-anchor="${(xa + xb) / 2 > W - 70 ? 'end' : (xa + xb) / 2 < 70 ? 'start' : 'middle'}">${esc(a === b ? la : `${la} – ${lb}`)}</text>`
+      : `<text class="nv-label" x="${Math.max(2, xa).toFixed(1)}" y="68" text-anchor="${xa < 40 ? 'start' : 'middle'}">${esc(la)}</text><text class="nv-label" x="${Math.min(W - 2, xb).toFixed(1)}" y="68" text-anchor="${xb > W - 40 ? 'end' : 'middle'}">${esc(lb)}</text>`;
+    els.nav.innerHTML = `<svg viewBox="0 0 ${W} 72" preserveAspectRatio="none">`
+      + `<rect class="nv-bg" x="0" y="${top - 2}" width="${W}" height="${bot - top + 4}" rx="4"/>`
+      + `<path class="nv-line" d="${path(0, n - 1)}"/>`
+      + `<rect class="nv-sel" data-nv="sel" x="${xa.toFixed(1)}" y="${top - 2}" width="${(xb - xa).toFixed(1)}" height="${bot - top + 4}"/>`
+      + `<path class="nv-line sel" d="${path(a, b)}"/>`
+      + handle(xa, 'l') + handle(xb, 'r') + labels + '</svg>';
+    els.nav.setAttribute('aria-valuetext', `${la} to ${lb}`);
+  }
+  function bindNav() {
+    els.nav.addEventListener('pointerdown', (e) => {
+      if (!full.length) return;
+      const r = els.nav.getBoundingClientRect();
+      const g = navGeom();
+      const part = e.target.closest?.('[data-nv]')?.dataset.nv || 'brush';
+      drag = { part, i0: g.I(((e.clientX - r.left) / r.width) * g.W), a0: sel[0], b0: sel[1], left: r.left, width: r.width };
+      els.nav.setPointerCapture(e.pointerId);
+      if (part === 'brush') sel = [drag.i0, drag.i0];
+      e.preventDefault();
+      frame();
+    });
+    els.nav.addEventListener('pointermove', (e) => {
+      if (!drag) return;
+      const g = navGeom();
+      const i = g.I(((e.clientX - drag.left) / drag.width) * g.W);
+      if (drag.part === 'l') sel = [Math.min(i, sel[1]), sel[1]];
+      else if (drag.part === 'r') sel = [sel[0], Math.max(i, sel[0])];
+      else if (drag.part === 'sel') {
+        const w = drag.b0 - drag.a0;
+        const a = Math.max(0, Math.min(g.n - 1 - w, drag.a0 + (i - drag.i0)));
+        sel = [a, a + w];
+      } else sel = [Math.min(drag.i0, i), Math.max(drag.i0, i)];
+      frame();
+    });
+    const end = () => { drag = null; };
+    els.nav.addEventListener('pointerup', end);
+    els.nav.addEventListener('pointercancel', end);
+    els.nav.addEventListener('keydown', (e) => {
+      if (!full.length || !['ArrowLeft', 'ArrowRight'].includes(e.key)) return;
+      e.preventDefault();
+      const d = e.key === 'ArrowLeft' ? -1 : 1;
+      if (e.shiftKey) sel = [sel[0], Math.max(sel[0], Math.min(full.length - 1, sel[1] + d))];
+      else if (sel[0] + d >= 0 && sel[1] + d < full.length) sel = [sel[0] + d, sel[1] + d];
+      renderSelection();
+    });
+  }
+  let raf = 0;
+  function frame() {
+    if (raf) return;
+    raf = requestAnimationFrame(() => { raf = 0; renderSelection(); });
+  }
+  function renderSelection() {
+    drawNav();
+    const v = visible();
+    if (els.navRange) {
+      const a = v.length ? longDate(v[0].date) : '', b = v.length ? longDate(v[v.length - 1].date) : '';
+      mount(els.navRange, !v.length ? 'Select range' : a === b ? a : `${a} – ${b}`, h('span', { class: 'an-caret' }, '▾'));
+    }
+    renderStats();
+    renderMain();
+    if (S.drawer && S.groupBy) renderDrawer();
+  }
+
+  function renderStats() {
+    if (!els.stats) return;
+    const v = visible().map((p) => p.value).filter(isNum);
+    let s = { count: 0, sum: 0, change: 0, changePct: 0, avg: 0, min: 0, max: 0, std: 0 };
+    if (v.length) {
+      const sum = v.reduce((a, b) => a + b, 0);
+      const avg = sum / v.length;
+      const first = v[0], last = v[v.length - 1];
+      s = { count: v.length, sum, change: last - first, changePct: pctFrom(last, first), avg, min: Math.min(...v), max: Math.max(...v), std: std(v, avg) };
+    }
+    const cells = [
+      [s.count.toLocaleString('en-US'), 'No. of scores'], [fmt(s.sum), 'Sum'], [`${s.change < 0 ? '-' : ''}${fmt(Math.abs(s.change))}`, 'Change'], [`${s.changePct}%`, 'Change %'],
+      [fmt(s.avg), 'Average'], [fmt(s.min), 'Minimum'], [fmt(s.max), 'Maximum'], [fmt(s.std), 'Std deviation'],
+    ];
+    mount(els.stats, cells.map(([n, l]) => h('div', { class: 'an-stat' }, h('b', { title: n }, n), h('span', l))));
+  }
+
+  // ---- toolbar
+  const iconBtn = (on, title, content, onClick, cls = '') => h('button', { type: 'button', class: ['an-ico', cls, on && 'active'], title, 'aria-label': title, 'aria-pressed': String(!!on), onclick: onClick }, content);
+  function setDrawer(open) {
+    S.drawer = open;
+    els.drawer.classList.toggle('open', open);
+    renderToolbar();
+    setTimeout(renderMain, 260);
+  }
+  function renderToolbar() {
+    if (!els.toolbar) return;
+    const toggle = (k) => () => { S[k] = !S[k]; renderToolbar(); renderMain(); };
+    const ctWrap = h('div', { class: 'an-menuwrap' });
+    ctWrap.appendChild(iconBtn(false, 'Chart type', ICONS[S.chartType](), () => {
+      const open = ctWrap.querySelector('.an-menu');
+      if (open) return open.remove();
+      const m = h('div', { class: 'an-menu', role: 'menu' }, [['line', 'Line'], ['area', 'Area'], ['bar', 'Bar']].map(([k, label]) => h('button', {
+        type: 'button', role: 'menuitemradio', 'aria-checked': String(S.chartType === k), class: S.chartType === k ? 'active' : '',
+        onclick: () => { S.chartType = k; renderToolbar(); renderMain(); },
+      }, ICONS[k](), h('span', label))));
+      ctWrap.appendChild(m);
+      setTimeout(() => {
+        const close = (e) => { if (!ctWrap.contains(e.target)) { m.remove(); document.removeEventListener('mousedown', close); } };
+        document.addEventListener('mousedown', close);
+      }, 0);
+    }));
+    mount(els.toolbar,
+      iconBtn(S.drawer || !!S.groupBy, 'Group by', '☰', () => setDrawer(!S.drawer)),
+      h('div', { class: 'an-search' }, icon('search', 15), h('input', { class: 'input', placeholder: 'Search breakdowns and elements', value: S.q, 'aria-label': 'Search', oninput: debounce((e) => onSearch(e.target.value), 250) })),
+      S.filters.length ? h('div', { class: 'an-fchips' },
+        S.filters.map((f) => h('span', { class: 'an-fchip' }, filterLabel(f), h('button', { type: 'button', title: 'Remove filter', 'aria-label': `Remove filter ${filterLabel(f)}`, onclick: () => removeFilter(f) }, icon('close', 12)))),
+        S.filters.length > 1 ? h('button', { class: 'an-clear', type: 'button', title: 'Clear all', onclick: clearFilters }, 'Clear all') : null) : null,
+      h('div', { class: 'an-tb-actions' },
+        iconBtn(S.labels, 'Point labels', ICONS.labels(), toggle('labels')),
+        iconBtn(S.median, 'Median', ICONS.median(), toggle('median')),
+        iconBtn(S.band, 'Confidence band', ICONS.band(), toggle('band')),
+        iconBtn(S.forecast, 'Forecast', ICONS.forecast(), toggle('forecast')),
+        h('span', { class: 'an-tb-sep' }),
+        iconBtn(S.score, 'Score', ICONS.score(), toggle('score')),
+        iconBtn(S.delta, 'Change (Δ)', 'Δ', toggle('delta'), 'glyph'),
+        iconBtn(S.pct, 'Change % (Δ%)', 'Δ%', toggle('pct'), 'glyph'),
+        iconBtn(S.yoy, 'Year-over-year (YOY)', 'YOY', toggle('yoy'), 'glyph yoy'),
+        h('span', { class: 'an-tb-sep' }),
+        ctWrap,
+        h('span', { class: 'an-tb-sep' }),
+        iconBtn(false, 'Close', ICONS.close(), () => navigate('/dashboards'))));
+  }
+
+  // ---- filters and search
+  function onPickItem(r) {
+    const dim = S.groupBy;
+    if (!dim || dimOf(dim)?.masked) return;
+    if (S.filters.some((f) => f.dim === dim && JSON.stringify(f.key) === r.id)) return;
+    S.filters = [...S.filters, { dim, key: r.key, label: String(r.label) }];
+    renderToolbar();
+    load();
+  }
+  function removeFilter(f) {
+    S.filters = S.filters.filter((x) => x !== f);
+    renderToolbar();
+    load();
+  }
+  function clearFilters() {
+    S.filters = [];
+    renderToolbar();
+    load();
+  }
+  let searchSeq = 0;
+  async function onSearch(q) {
+    S.q = q;
+    const my = ++searchSeq;
+    const text = q.trim();
+    if (text && !S.drawer) setDrawer(true);
+    if (!text) { searchHits = null; renderDrawer(); return; }
+    // every breakdown with stored values (age category is computed per moment, so it has none)
+    const pool = dims.filter((d) => d.key !== 'age_bucket');
+    const res = await Promise.allSettled(pool.map((d) => get(`/api/dash/values?dataset=incident&field=${encodeURIComponent(d.key)}&q=${encodeURIComponent(text)}`)));
+    if (my !== searchSeq) return;
+    searchHits = pool.map((d, i) => ({ dim: d.key, values: res[i].status === 'fulfilled' ? res[i].value.map((v) => v.label) : [] })).filter((x) => x.values.length);
+    renderDrawer();
+  }
+  function onGroupByChange(dim) {
+    S.groupBy = dim;
+    if (!dim) { grouped = []; renderDrawer(); renderMain(); return; }
+    load();
+  }
+
+  // ---- drawer
+  /** Each value's score, Δ and Δ% at the selected date (the focal date, else the last visible step). */
+  function groupRows() {
+    const dates = full.map((p) => p.date);
+    const v = visible();
+    let fi = dates.indexOf(S.focal || (v.length ? v[v.length - 1].date : ''));
+    if (S.focal && fi < 0) fi = focalIdx();
+    if (fi < 0) fi = dates.length - 1;
+    const picked = new Set(S.filters.filter((f) => f.dim === S.groupBy).map((f) => JSON.stringify(f.key)));
+    return grouped.filter((g) => !picked.has(g.id)).map((g) => {
+      const cur = fi >= 0 ? g.byDate[dates[fi]] ?? 0 : 0;
+      const prev = fi > 0 ? g.byDate[dates[fi - 1]] ?? 0 : 0;
+      return { ...g, cur, change: Math.round((cur - prev) * 100) / 100, changePct: pctFrom(cur, prev) };
+    }).filter((r) => r.cur !== 0 || r.change !== 0);
+  }
+  function renderDrawer() {
+    if (!els.drawer) return;
+    const used = new Set(S.filters.map((f) => f.dim));
+    let content;
+    if (S.q.trim()) {
+      content = !searchHits ? [] : searchHits.length ? searchHits.map((g) => h('div', { class: 'an-dimgroup' },
+        h('button', { type: 'button', class: ['an-dim', S.groupBy === g.dim && 'active'], onclick: () => onGroupByChange(g.dim) },
+          h('i'), h('span', { class: 'grow' }, dimLabel(g.dim)), h('span', { class: 'n' }, String(g.values.length))),
+        h('div', { class: 'an-gt' }, g.values.map((val) => h('div', { class: 'an-gr plain' }, h('span', { class: 'an-gr-name' }, String(val)))))))
+        : [h('div', { class: 'an-gr-empty' }, 'No matching values')];
+    } else {
+      const list = [{ key: '', label: 'None (single value)' }, ...dims.filter((d) => !used.has(d.key))];
+      content = list.map((d) => {
+        const open = d.key && S.groupBy === d.key;
+        const rows = open ? groupRows() : [];
+        return h('div', { class: 'an-dimgroup' },
+          h('button', { type: 'button', class: ['an-dim', S.groupBy === d.key && 'active'], onclick: () => onGroupByChange(S.groupBy === d.key ? '' : d.key) },
+            h('i'), h('span', { class: 'grow' }, d.label), d.key ? h('span', { class: 'an-caret' }, open ? '▾' : '▸') : null),
+          open ? h('div', { class: 'an-gt' },
+            h('div', { class: 'an-gr hd' }, h('span', 'Item'), h('span', 'Score'), h('span', 'Δ'), h('span', 'Δ%')),
+            rows.length ? rows.map((r) => h(d.masked ? 'div' : 'button', {
+              type: d.masked ? undefined : 'button', class: 'an-gr', title: d.masked ? undefined : 'Filter everything to this value', onclick: d.masked ? undefined : () => onPickItem(r),
+            }, h('span', { class: 'an-gr-name' }, h('i', { style: { background: r.color } }), r.label), h('span', fmt(Math.round(r.cur))), h('span', fmt(r.change)), h('span', `${r.changePct}%`)))
+              : h('div', { class: 'an-gr-empty' }, 'No data')) : null);
+      });
+    }
+    mount(els.drawer, h('div', { class: 'an-drawer-in' },
+      h('div', { class: 'an-drawer-hd' }, h('span', 'Group by'), h('button', { class: 'an-drawer-x', type: 'button', title: 'Close', 'aria-label': 'Close', onclick: () => setDrawer(false) }, '✕')),
+      h('div', { class: 'an-drawer-body' }, content)));
+  }
+
+  // ---- main chart
+  function yearAgoIdx(dates, i) {
+    const target = shiftIso(dates[i], -365);
+    let idx = -1;
+    for (let k = 0; k <= i; k++) { if (dates[k] <= target) idx = k; else break; }
+    return idx;
+  }
+  function measureAt(dates, vals, i, key) {
+    const v = vals[i], p = vals[i - 1];
+    if (key === 'delta') return i > 0 && isNum(v) && isNum(p) ? Math.round((v - p) * 100) / 100 : null;
+    if (key === 'pct') return i > 0 && isNum(v) && isNum(p) && p ? r1(((v - p) / p) * 100) : null;
+    if (key === 'yoy') { const y = yearAgoIdx(dates, i); return y >= 0 ? vals[y] : null; }
+    return v;
+  }
+  function renderMain() {
+    if (!els.chart) return;
+    if (ctxError) { mount(els.chart); mount(els.legend); return; }
+    const [a, b] = sel;
+    const idx = [];
+    for (let i = a; i <= b && i < full.length; i++) idx.push(i);
+    const dates = full.map((p) => p.date);
+    const extras = [['delta', 'Δ', 'dashed'], ['pct', 'Δ%', 'dotted'], ['yoy', 'YOY', 'dashdot']].filter(([k]) => S[k]);
+    const focal = S.focal ? idx.findIndex((i) => full[i].date <= S.focal && S.focal <= full[i].to) : -1;
+    const W = Math.max(320, els.chart.clientWidth || 800), H = els.chart.clientHeight || 440;
+    let labels = idx.map((i) => axisLabel(dates[i]));
+    let tips = idx.map((i) => longDate(dates[i]));
+    const series = [];
+    const opts = { width: W, height: H, format: fmt, pointLabels: S.labels, selected: focal >= 0 ? focal : null, empty: 'No data in this range' };
+
+    if (showBreakdown() && grouped.length) {
+      for (const g of grouped) {
+        if (S.hidden.has(g.id)) continue;
+        const vals = dates.map((d) => g.byDate[d] ?? 0);
+        // with Score off and no other measure on, the score still shows (the chart is never blank)
+        if (S.score || !extras.length) series.push({ key: g.id, name: g.label, color: g.color, kind: S.chartType, values: idx.map((i) => vals[i]) });
+        for (const [k, label, dash] of extras) series.push({ key: `${g.id}:${k}`, name: `${g.label} · ${label}`, color: g.color, kind: 'line', dash, values: idx.map((i) => measureAt(dates, vals, i, k)) });
+      }
+      mount(els.legend, grouped.map((g) => h('button', { type: 'button', class: ['an-leg', S.hidden.has(g.id) && 'off'], 'aria-pressed': String(!S.hidden.has(g.id)),
+        onclick: () => { S.hidden.has(g.id) ? S.hidden.delete(g.id) : S.hidden.add(g.id); renderMain(); } }, h('i', { style: { background: g.color, boxShadow: `0 0 7px ${g.color}` } }), g.label)));
+    } else {
+      const vals = full.map((p) => p.value);
+      const v = idx.map((i) => vals[i]);
+      const n = v.length;
+      const showScore = S.score || !extras.length;
+      const finite = v.filter(isNum);
+      const fc = S.forecast && showScore && n >= 3 && finite.length >= 3 ? forecast(v.map((x) => x ?? 0), Math.max(3, Math.round(n * 0.2))) : [];
+      if (fc.length) {
+        labels = [...labels, ...fc.map((_, k) => `+${k + 1}`)];
+        tips = [...tips, ...fc.map((_, k) => `+${k + 1}`)];
+      }
+      const pad = (arr) => [...arr, ...fc.map(() => null)];
+      if (showScore) {
+        series.push({ key: 'score', name: meta.label, color: MEASURE_COLOR.score, kind: S.chartType, values: pad(v) });
+        if (fc.length) series.push({ key: 'forecast', name: 'Forecast', color: 'var(--series-2)', kind: 'line', dash: 'dashed', values: [...v.map((x, k) => (k === n - 1 ? x : null)), ...fc] });
+        if (S.median && finite.length) opts.median = median(finite);
+        if (S.band && finite.length) { const mu = mean(finite), sd = std(finite, mu); opts.band = [mu - sd, mu + sd]; }
+      }
+      for (const [k, label, dash] of extras) series.push({ key: k, name: label, color: MEASURE_COLOR[k], kind: 'line', dash, values: pad(idx.map((i) => measureAt(dates, vals, i, k))) });
+      const legend = [
+        S.score && ['score', meta.label || 'Score'], S.delta && ['delta', 'Δ'], S.pct && ['pct', 'Δ%'], S.yoy && ['yoy', 'YOY'],
+      ].filter(Boolean);
+      mount(els.legend, legend.length > 1 ? legend.map(([k, name]) => h('button', { type: 'button', class: 'an-leg', onclick: () => { S[k] = !S[k]; renderToolbar(); renderMain(); } },
+        h('i', { style: { background: MEASURE_COLOR[k], boxShadow: `0 0 7px ${MEASURE_COLOR[k]}` } }), name)) : null);
+    }
+    mount(els.chart, h('div', { style: { height: '100%' }, html: analyticsChart({ ...opts, labels, tips, series }) }));
+  }
+
+  // ---------------------------------------------------------------- compare
+  function cmpStats() {
+    return (cmp?.groups || []).map((g) => {
+      const vals = g.series.map((p) => p.value ?? 0);
+      const n = vals.length;
+      const sum = vals.reduce((a, b) => a + b, 0);
+      const avg = n ? sum / n : 0;
+      const last = n ? vals[n - 1] : 0;
+      const prevLast = g.prev.length ? g.prev[g.prev.length - 1] : 0;
+      const change = last - prevLast;
+      return {
+        g, vals, n, sum, avg, min: n ? Math.min(...vals) : 0, max: n ? Math.max(...vals) : 0, std: std(vals, avg),
+        latest: last, change, changePct: prevLast === 0 ? (last ? 100 : 0) : Math.round(Math.abs((change / prevLast) * 100)),
+        visible: !S.cmpHidden.has(g.id),
+        field: `${S.cmpDim}=${S.cmpDim === 'severity' && Number.isInteger(g.key) ? SEVERITIES[g.key] : g.key ?? 'null'}`,
+      };
+    });
+  }
+  function renderCompare() {
+    if (S.tab !== 'compare') return;
+    const periodHost = h('div', { class: 'an-cmp-period' });
+    mount(periodHost, h('button', { class: 'an-chipbtn', type: 'button', 'data-pop-keep': '',
+      onclick: () => openPopover(periodHost, datePicker({ mode: 'range', granularity: aggOption(S.agg).gran, start: S.cmpFrom, end: S.cmpTo,
+        onApply: (r) => { closePopover(); S.cmpFrom = r.start; S.cmpTo = r.end; renderCompare(); loadCompare(); }, onClose: closePopover }), 'right') },
+    h('b', S.cmpFrom && S.cmpTo ? `${shortDate(S.cmpFrom)} – ${shortDate(S.cmpTo)}` : 'Pick a range'), h('span', { class: 'an-caret' }, '▾')));
+    const sec = h('section', { class: 'an-cmp' },
+      kpiPicker(),
+      h('div', { class: 'an-cmp-ctrl' },
+        h('span', { class: 'an-cmp-lbl' }, 'Compare by'),
+        h('select', { class: 'an-sel an-cmp-dim', title: 'Dimension', 'aria-label': 'Compare by', onchange: (e) => { S.cmpDim = e.target.value; S.cmpHidden = new Set(); loadCompare(); } },
+          dims.map((d) => h('option', { value: d.key, selected: d.key === S.cmpDim }, d.label))),
+        h('span', { class: 'an-cmp-sep' }),
+        h('label', { class: ['an-toggle', S.cmpPrev && 'on'] },
+          h('input', { type: 'checkbox', checked: S.cmpPrev, onchange: (e) => { S.cmpPrev = e.target.checked; renderCompare(); } }),
+          h('span', { class: 'an-track' }, h('span', { class: 'an-knob' })), h('span', 'vs previous period')),
+        periodHost,
+        aggSelect(S.agg, (v) => { S.agg = v; S.dateFrom = ''; S.dateTo = ''; loadCompare(); })));
+    mount(body, sec);
+    if (!cmp || cmp.dim !== S.cmpDim) { sec.appendChild(loading()); return; }
+    if (cmp.error) { sec.appendChild(h('div', { class: 'callout bad' }, cmp.error)); return; }
+    const stats = cmpStats();
+    const toggleSeg = (s) => { S.cmpHidden.has(s.g.id) ? S.cmpHidden.delete(s.g.id) : S.cmpHidden.add(s.g.id); renderCompare(); };
+    const deltaCls = (s) => ['an-delta', s.change > 0 && 'up', s.change < 0 && 'down'];
+    sec.appendChild(h('div', { class: 'an-seglegend' },
+      stats.map((s) => h('button', { type: 'button', class: ['an-seg', !s.visible && 'off'], 'aria-pressed': String(s.visible), onclick: () => toggleSeg(s),
+        style: s.visible ? { borderColor: `color-mix(in srgb, ${s.g.color} 50%, transparent)`, background: `color-mix(in srgb, ${s.g.color} 7%, var(--surface))` } : {} },
+      h('span', { class: 'an-swatch', style: { background: s.g.color, boxShadow: `0 0 10px color-mix(in srgb, ${s.g.color} 60%, transparent)` } }),
+      h('span', { class: 'an-seg-txt' }, h('span', { class: 'an-seg-name' }, s.g.label), h('span', { class: 'an-seg-field' }, s.field)),
+      h('span', { class: 'an-seg-latest' }, h('b', fmt(s.latest)), s.change !== 0 ? h('span', { class: deltaCls(s) }, `${s.change > 0 ? '▲' : '▼'}${s.changePct}%`) : null))),
+      stats.length ? null : h('div', { class: 'an-empty-note' }, 'No data for this dimension in the selected range.')));
+    if (!stats.length) return;
+    const labels = cmp.dates.map(shortDate);
+    const series = [];
+    stats.forEach((s, i) => {
+      if (!s.visible) return;
+      series.push({ key: s.g.id, name: s.g.label, color: s.g.color, kind: i === 0 ? 'area' : 'line', values: s.vals });
+      if (S.cmpPrev) series.push({ key: `${s.g.id}:prev`, name: `${s.g.label} · prev`, color: s.g.color, kind: 'line', dash: 'dashed', values: s.g.prev });
+    });
+    const chartEl = h('div', { class: 'an-chart' });
+    sec.appendChild(h('div', { class: 'an-panel' },
+      h('div', { class: 'an-panel-hd' },
+        h('div', { class: 'an-panel-title' }, `${meta.label} by ${dimLabel(S.cmpDim).toLowerCase()}`, h('span', { class: 'an-badge' }, `${stats.length} segments · ${cmp.dates.length} days`)),
+        S.cmpPrev ? h('div', { class: 'an-prevhint' }, h('i'), 'previous period') : null),
+      chartEl));
+    chartEl.innerHTML = analyticsChart({ width: Math.max(320, (chartEl.clientWidth || 840) - 24), height: 390, labels, tips: cmp.dates.map(longDate), series, format: fmt, empty: 'Every segment is hidden' });
+    sec.appendChild(h('div', { class: 'an-panel' },
+      h('div', { class: 'an-table-hd' }, `${dimLabel(S.cmpDim)} comparison`, h('span', 'Aggregates over selected range')),
+      h('div', { class: 'table-wrap' }, h('table', { class: 'an-tbl' },
+        h('thead', h('tr', h('th', 'Segment'), h('th', { class: 'c' }, 'Trend'), h('th', 'No. scores'), h('th', 'Sum'), h('th', 'Average'), h('th', 'Minimum'), h('th', 'Maximum'), h('th', 'Std dev'), h('th', 'Change'))),
+        h('tbody', stats.map((s) => h('tr', { class: s.visible ? '' : 'off' },
+          h('td', h('div', { class: 'an-segcell' }, h('span', { class: 'an-swatch', style: { background: s.g.color } }), h('span', { class: 'an-seg-txt' }, h('span', { class: 'an-seg-name' }, s.g.label), h('span', { class: 'an-seg-field' }, s.field)))),
+          h('td', { class: 'c', html: sparkPoints(s.vals, s.g.color) }),
+          h('td', String(s.n)), h('td', h('b', fmt(Math.round(s.sum)))), h('td', fmt(s.avg)), h('td', fmt(s.min)), h('td', fmt(s.max)), h('td', fmt(s.std)),
+          h('td', h('div', { class: 'an-chg' }, h('span', { class: deltaCls(s) }, `${s.change > 0 ? '+' : s.change < 0 ? '-' : ''}${fmt(Math.abs(s.change))}`), s.change !== 0 ? h('span', { class: [...deltaCls(s), 'pill'] }, `${s.changePct}%`) : null)))))))));
+  }
+  /** The table's 90 × 30 trend line. */
+  function sparkPoints(vals, color) {
+    if (!vals.length) return '';
+    const mx = Math.max(...vals), mn = Math.min(...vals), rng = mx - mn || 1;
+    const pts = vals.map((v, i) => `${((i / Math.max(vals.length - 1, 1)) * 90).toFixed(1)},${(28 - ((v - mn) / rng) * 26).toFixed(1)}`).join(' ');
+    return `<svg viewBox="0 0 90 30" preserveAspectRatio="none" width="90" height="30" style="overflow:visible" aria-hidden="true"><polyline points="${pts}" fill="none" stroke="${color}" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" vector-effect="non-scaling-stroke"/></svg>`;
+  }
+
+  // ---------------------------------------------------------------- lifecycle
+  const onResize = debounce(() => { if (S.tab === 'overview') renderSelection(); else renderCompare(); }, 150);
+  window.addEventListener('resize', onResize);
+  renderShell();
+  load();
+  if (S.tab === 'compare') loadCompare();
+  return () => {
+    window.removeEventListener('resize', onResize);
+    closePopover();
+    if (raf) cancelAnimationFrame(raf);
+  };
+}
