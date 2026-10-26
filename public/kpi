@@ -1,227 +1,48 @@
-/* Analytics hub (/analytics/kpi/:metric): Platform X's analytics hub page, drawn with KPI Dashboard's
-   tokens. Up is red and down is green, as on Platform X's hub. */
+Summary: Update TH status stages and capture who updated the status
 
-.an { display: flex; flex-direction: column; min-height: 100%; }
-.an-busy .an-head, .an-busy .an-main, .an-busy .an-cmp > :not(.an-cmp-ctrl) { opacity: .6; transition: opacity .15s; }
-.an-hero { display: flex; align-items: flex-end; justify-content: space-between; gap: 24px; padding: 18px 0 0; }
-.an-hero-left { padding-bottom: 14px; }
-.an-title { font-size: 22px; font-weight: 800; color: var(--text-primary); letter-spacing: -.01em; line-height: 1.1; }
-.an-tabs { display: flex; gap: 22px; }
-.an-tab { background: none; border: 0; border-bottom: 2px solid transparent; color: var(--text-muted); font: inherit; font-size: 14px; font-weight: 600; padding: 8px 2px 14px; margin-bottom: -1px; cursor: pointer; }
-.an-tab:hover { color: var(--text-secondary); }
-.an-tab.active { color: var(--accent); border-bottom-color: var(--accent); }
-.an-sel { background: var(--surface-2); border: 1px solid var(--border); border-radius: 8px; color: var(--text-primary); font: inherit; font-size: 12.5px; padding: 6px 10px; cursor: pointer; outline: none; }
-.an-sel:hover { border-color: var(--accent); }
-.an-caret { font-size: 10px; color: var(--text-muted); }
+Type: Sub-task (parent: WM-13)
 
-/* ---- head: title + value, navigator + stats ---- */
-.an-head { border-top: 1px solid var(--border); border-bottom: 1px solid var(--border); padding: 16px 0; }
-.an-head-grid { display: grid; grid-template-columns: minmax(220px, 1fr) 2.4fr; gap: 28px; align-items: start; }
-.an-kpi-col, .an-nav-col { position: relative; min-width: 0; }
-.an-kpi-name { font-size: 15px; font-weight: 600; color: var(--text-primary); margin-bottom: 8px; }
-/* the KPI name is a picker: it reads as the title, with a caret */
-.an-kpi-pick { appearance: none; -webkit-appearance: none; max-width: 100%; background: transparent url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='6'%3E%3Cpath d='M1 1l4 4 4-4' fill='none' stroke='%23888' stroke-width='1.6'/%3E%3C/svg%3E") no-repeat right 6px center;
-  border: 1px solid transparent; border-radius: 8px; color: inherit; font: inherit; padding: 3px 24px 3px 6px; margin-left: -7px; cursor: pointer; outline: none; text-overflow: ellipsis; }
-.an-kpi-pick:hover, .an-kpi-pick:focus-visible { border-color: var(--border); background-color: var(--surface-2); }
-.an-kpi-pick option, .an-kpi-pick optgroup { background: var(--surface); color: var(--text-primary); }
-.an-crumbf { color: var(--accent); font-weight: 700; }
-.an-link { background: none; border: 0; padding: 2px 0; font: inherit; font-size: 13px; color: var(--text-secondary); cursor: pointer; display: inline-flex; align-items: center; gap: 5px; }
-.an-link:hover { color: var(--text-primary); }
-.an-link.accent { color: var(--accent); font-weight: 600; }
-.an-link.accent:hover { text-decoration: underline; }
-.an-link.accent .an-caret { color: var(--accent); }
-.an-value-row { display: flex; align-items: baseline; gap: 12px; margin-top: 14px; flex-wrap: wrap; }
-.an-value { font-size: 40px; font-weight: 800; color: var(--text-primary); line-height: 1; font-variant-numeric: tabular-nums; }
-.an-trend { font-size: 14px; font-weight: 600; font-variant-numeric: tabular-nums; }
-.an-trend.up, .an-delta.up { color: var(--status-critical); }
-.an-trend.down, .an-delta.down { color: var(--status-good); }
-.an-trend-vs { font-size: 12px; color: var(--text-muted); }
-.an-nav-hd { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 6px; }
-.an-nav { position: relative; height: 72px; margin-top: 2px; user-select: none; touch-action: none; }
-.an-nav svg { display: block; width: 100%; height: 100%; overflow: visible; }
-.an-nav .nv-bg { fill: color-mix(in srgb, var(--plane) 55%, transparent); }
-.an-nav .nv-line { fill: none; stroke: var(--accent); stroke-opacity: .55; stroke-width: 1; vector-effect: non-scaling-stroke; }
-.an-nav .nv-line.sel { stroke-opacity: 1; stroke-width: 1.2; }
-.an-nav .nv-sel { fill: color-mix(in srgb, var(--accent) 22%, transparent); cursor: grab; }
-.an-nav .nv-handle { fill: #e6edf6; stroke: #aab4c6; stroke-width: 1; cursor: ew-resize; }
-.an-nav .nv-grip { stroke: #8792a6; stroke-width: 1; pointer-events: none; }
-.an-nav .nv-label { fill: var(--text-muted); font-size: 11px; font-variant-numeric: tabular-nums; pointer-events: none; }
-.an-stats { display: grid; grid-template-columns: repeat(8, minmax(0, 1fr)); gap: 6px; margin-top: 10px; }
-.an-stat { text-align: center; min-width: 0; }
-.an-stat b { display: block; font-size: 15px; font-weight: 700; color: var(--text-primary); font-variant-numeric: tabular-nums; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.an-stat span { display: block; font-size: 11px; color: var(--text-muted); margin-top: 2px; }
+User story
 
-/* ---- popovers: Platform X's date picker ---- */
-.an-pop { position: absolute; z-index: 41; }
-.an-pop.focal { top: 56px; left: 0; }
-.an-pop.range { top: 34px; left: 0; }
-.an-pop.right { top: 42px; right: 0; }
-.dp { display: flex; background: var(--surface); border: 1px solid var(--border); border-radius: 12px; box-shadow: var(--shadow-lg); overflow: hidden; font-size: 13px; color: var(--text-primary); }
-.dp-presets { display: flex; flex-direction: column; gap: 2px; padding: 10px; border-right: 1px solid var(--border); min-width: 120px; }
-.dp-preset { text-align: left; background: none; border: 0; color: var(--text-secondary); font: inherit; font-size: 12px; font-weight: 600; letter-spacing: .04em; padding: 9px 12px; border-radius: 8px; cursor: pointer; }
-.dp-preset:hover { background: var(--hover); color: var(--text-primary); }
-.dp-preset.active { background: color-mix(in srgb, var(--accent) 16%, transparent); color: var(--accent); }
-.dp-main { display: flex; flex-direction: column; padding: 12px 14px; gap: 10px; }
-.dp-cals { display: flex; gap: 18px; }
-.dp-cal-hd { display: flex; align-items: center; justify-content: space-between; margin-bottom: 6px; }
-.dp-cal-title { font-weight: 700; font-size: 13px; }
-.dp-nav { width: 26px; height: 26px; border-radius: 6px; border: 0; background: none; color: var(--text-secondary); cursor: pointer; font-size: 16px; line-height: 1; }
-.dp-nav:hover { background: var(--hover); color: var(--text-primary); }
-.dp-ghost { pointer-events: none; }
-.dp-grid { display: grid; grid-template-columns: 26px repeat(7, 30px); gap: 2px; }
-.dp-wk-h, .dp-dow { font-size: 10.5px; color: var(--text-muted); text-align: center; padding: 4px 0; font-weight: 600; }
-.dp-wk { font-size: 10.5px; color: var(--text-muted); display: grid; place-items: center; border-radius: 6px; }
-.dp-wk.wk-sel { background: color-mix(in srgb, var(--accent) 16%, transparent); color: var(--accent); }
-.dp-day { height: 28px; border: 0; border-radius: 6px; background: none; color: var(--text-primary); font: inherit; font-size: 12px; cursor: pointer; font-variant-numeric: tabular-nums; }
-.dp-day:hover { background: var(--hover); }
-.dp-day.out { color: var(--text-muted); opacity: .45; }
-.dp-day.in-range { background: color-mix(in srgb, var(--accent) 14%, transparent); }
-.dp-day.sel, .dp-day.edge { background: var(--accent); color: var(--accent-ink, #fff); }
-.dp-cellsel { min-width: 240px; }
-.dp-cells { display: grid; gap: 6px; }
-.dp-cells.c3 { grid-template-columns: repeat(3, 1fr); }
-.dp-cells.c2 { grid-template-columns: repeat(2, 1fr); }
-.dp-cell { border: 1px solid var(--border); border-radius: 8px; background: none; color: var(--text-primary); font: inherit; font-size: 12.5px; padding: 10px 6px; cursor: pointer; display: flex; flex-direction: column; align-items: center; gap: 2px; }
-.dp-cell.lg { padding: 16px 6px; font-size: 14px; font-weight: 700; }
-.dp-cell small { font-size: 10.5px; font-weight: 500; color: var(--text-muted); }
-.dp-cell:hover { border-color: var(--accent); }
-.dp-cell.sel { background: color-mix(in srgb, var(--accent) 18%, transparent); border-color: var(--accent); color: var(--accent); }
-.dp-foot { display: flex; align-items: flex-end; gap: 14px; border-top: 1px solid var(--border); padding-top: 10px; }
-.dp-io label { display: block; font-size: 10.5px; color: var(--text-muted); font-weight: 600; text-transform: uppercase; letter-spacing: .05em; }
-.dp-io-val { font-size: 13px; font-weight: 600; margin-top: 2px; min-width: 96px; }
-.dp-foot-btns { display: flex; gap: 8px; margin-left: auto; }
-.dp-btn { height: 30px; padding: 0 14px; border-radius: 8px; border: 1px solid var(--border-strong); background: var(--surface); color: var(--text-primary); font: inherit; font-size: 12.5px; font-weight: 600; cursor: pointer; }
-.dp-btn.primary { background: var(--accent); border-color: var(--accent); color: var(--accent-ink, #fff); }
-.dp-btn:disabled { opacity: .45; cursor: not-allowed; }
+As a threat hunt team member working in Swimlane, I want the TH status stages to match the agreed process and to show who last updated the status, so that it's clear where each hunt stands and who is responsible for moving it forward or approving it.
 
-/* ---- toolbar ---- */
-.an-toolbar { display: flex; align-items: center; gap: 14px; padding: 12px 0; border-bottom: 1px solid var(--border); flex-wrap: wrap; }
-.an-tb-actions { display: flex; align-items: center; gap: 8px; margin-left: auto; flex-wrap: wrap; }
-.an-ico { width: 38px; height: 38px; flex: 0 0 38px; border-radius: 50%; border: 1px solid var(--accent); background: color-mix(in srgb, var(--accent) 10%, transparent); color: var(--accent); cursor: pointer; font-family: inherit; display: inline-flex; align-items: center; justify-content: center; line-height: 1; transition: background .16s, border-color .16s, color .16s, transform .16s; }
-.an-ico:hover { background: color-mix(in srgb, var(--accent) 22%, transparent); color: var(--text-primary); transform: translateY(-1px); }
-.an-ico.active { background: var(--accent); border-color: var(--accent); color: var(--accent-ink, #fff); }
-.an-ico.glyph { font-size: 14px; font-weight: 800; letter-spacing: .01em; }
-.an-ico.yoy { font-size: 10px; letter-spacing: .02em; }
-.an-ico svg { width: 17px; height: 17px; display: block; }
-.an-tb-sep { width: 1px; height: 22px; background: var(--border); margin: 0 4px; }
-.an-search { position: relative; display: flex; align-items: center; }
-.an-search .input { width: 360px; height: 38px; border-radius: 19px; padding-left: 36px; }
-.an-search svg { position: absolute; left: 13px; color: var(--accent); pointer-events: none; }
-.an-fchips { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
-.an-fchip { display: inline-flex; align-items: center; gap: 8px; padding: 6px 6px 6px 14px; border-radius: 19px; border: 1px solid var(--accent); background: color-mix(in srgb, var(--accent) 16%, transparent); color: var(--accent); font-size: 12.5px; font-weight: 600; white-space: nowrap; }
-.an-fchip button { background: none; border: 0; color: inherit; cursor: pointer; display: inline-flex; padding: 3px; border-radius: 50%; }
-.an-fchip button:hover { background: color-mix(in srgb, var(--accent) 30%, transparent); }
-.an-clear { background: none; border: 0; color: var(--text-muted); font: inherit; font-size: 12px; text-decoration: underline; cursor: pointer; }
-.an-clear:hover { color: var(--text-primary); }
-.an-menuwrap { position: relative; display: inline-flex; }
-.an-menu { position: absolute; top: 46px; right: 0; z-index: 50; min-width: 132px; padding: 6px; background: var(--surface); border: 1px solid var(--border); border-radius: 12px; box-shadow: var(--shadow-lg); display: flex; flex-direction: column; gap: 2px; }
-.an-menu button { display: flex; align-items: center; gap: 10px; width: 100%; text-align: left; background: none; border: 0; font: inherit; font-size: 13px; color: var(--text-secondary); padding: 9px 12px; border-radius: 8px; cursor: pointer; }
-.an-menu button:hover { background: var(--hover); color: var(--text-primary); }
-.an-menu button.active { background: color-mix(in srgb, var(--accent) 16%, transparent); color: var(--accent); font-weight: 600; }
-.an-menu svg { width: 17px; height: 17px; display: block; }
+Context
 
-/* ---- main: Group by drawer + chart ---- */
-.an-main { flex: 1; padding: 14px 0 22px; display: flex; align-items: stretch; }
-.an-chart-col { flex: 1; min-width: 0; }
-.an-chart { height: 440px; min-width: 0; }
-.an-legend { display: flex; flex-wrap: wrap; align-items: center; justify-content: center; gap: 16px; padding: 2px 8px 8px; }
-.an-legend:empty { display: none; }
-.an-leg { display: inline-flex; align-items: center; gap: 7px; background: none; border: 0; font: inherit; font-size: 12px; color: var(--text-secondary); cursor: pointer; padding: 2px 4px; text-transform: capitalize; transition: opacity .15s; }
-.an-leg:hover { color: var(--text-primary); }
-.an-leg i { width: 9px; height: 9px; border-radius: 50%; flex: 0 0 auto; }
-.an-leg.off { opacity: .4; }
-.an-leg.off i { box-shadow: none !important; background: var(--text-muted) !important; }
-.an-drawer { width: 0; flex: 0 0 auto; overflow: hidden; transition: width .24s ease, margin .24s ease; }
-.an-drawer.open { width: 320px; margin-right: 16px; }
-.an-drawer-in { width: 320px; height: 100%; display: flex; flex-direction: column; background: var(--surface); border: 1px solid var(--border); border-radius: 12px; }
-.an-drawer-hd { display: flex; align-items: center; justify-content: space-between; padding: 14px 16px; border-bottom: 1px solid var(--border); font-size: 14px; font-weight: 700; color: var(--text-primary); }
-.an-drawer-x { background: none; border: 0; color: var(--text-muted); font-size: 15px; cursor: pointer; padding: 4px; border-radius: 6px; }
-.an-drawer-x:hover { background: var(--hover); color: var(--text-primary); }
-.an-drawer-body { padding: 10px; display: flex; flex-direction: column; gap: 2px; overflow-y: auto; }
-.an-dimgroup { display: flex; flex-direction: column; }
-.an-dim { display: flex; align-items: center; gap: 10px; width: 100%; text-align: left; background: none; border: 0; font: inherit; color: var(--text-secondary); font-size: 13px; padding: 10px 12px; border-radius: 8px; cursor: pointer; }
-.an-dim:hover { background: var(--hover); color: var(--text-primary); }
-.an-dim.active { background: color-mix(in srgb, var(--accent) 16%, transparent); color: var(--accent); font-weight: 600; }
-.an-dim i { width: 9px; height: 9px; border-radius: 50%; border: 1.5px solid var(--text-muted); flex: 0 0 auto; }
-.an-dim.active i { border-color: var(--accent); background: var(--accent); }
-.an-dim .grow { flex: 1; }
-.an-dim .n { font-size: 10px; font-weight: 700; color: var(--text-muted); background: var(--surface-2); border-radius: 9px; padding: 1px 7px; }
-.an-gt { padding: 4px 6px 10px; }
-.an-gr { display: grid; grid-template-columns: minmax(0, 1fr) 46px 46px 44px; gap: 6px; align-items: center; padding: 6px 8px; font-size: 12px; color: var(--text-primary); }
-.an-gr > span:not(.an-gr-name) { text-align: right; font-variant-numeric: tabular-nums; }
-.an-gr.hd { font-size: 10px; font-weight: 700; letter-spacing: .03em; color: var(--text-muted); text-transform: uppercase; border-bottom: 1px solid var(--border); padding-bottom: 6px; }
-.an-gr.plain { grid-template-columns: 1fr; padding: 5px 10px; }
-button.an-gr { width: 100%; background: none; border: 0; font: inherit; cursor: pointer; border-radius: 6px; text-align: left; }
-button.an-gr:hover { background: color-mix(in srgb, var(--accent) 14%, transparent); }
-.an-gr-name { display: flex; align-items: center; gap: 7px; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; text-transform: capitalize; }
-.an-gr-name i { width: 8px; height: 8px; border-radius: 2px; flex: 0 0 auto; }
-.an-gr-empty { padding: 10px 8px; font-size: 12px; color: var(--text-muted); }
+From the TH App meeting (Deployment by Severity discussion, 21 Oct 2026):
 
-/* ---- compare ---- */
-.an-cmp { padding: 18px 0; display: flex; flex-direction: column; gap: 18px; border-top: 1px solid var(--border); }
-.an-cmp-ctrl { display: flex; align-items: center; gap: 14px; flex-wrap: wrap; }
-.an-cmp-lbl { font-size: 13px; font-weight: 600; color: var(--text-muted); }
-.an-cmp-dim { border-color: var(--accent); box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 12%, transparent); font-weight: 700; }
-.an-cmp-sep { width: 1px; height: 24px; background: var(--border); }
-.an-toggle { position: relative; display: inline-flex; align-items: center; gap: 10px; height: 34px; padding: 0 14px; border-radius: 9px; border: 1px solid var(--border); background: var(--surface-2); cursor: pointer; font-size: 13px; color: var(--text-secondary); user-select: none; }
-.an-toggle.on { border-color: var(--accent); }
-.an-toggle input { position: absolute; opacity: 0; width: 0; height: 0; }
-.an-track { position: relative; width: 34px; height: 19px; border-radius: 19px; background: var(--track); border: 1px solid var(--border); transition: .2s; flex-shrink: 0; }
-.an-toggle.on .an-track { background: var(--accent); border-color: transparent; }
-.an-knob { position: absolute; top: 1px; left: 2px; width: 14px; height: 14px; border-radius: 50%; background: #fff; transition: left .2s; box-shadow: 0 1px 3px rgba(0, 0, 0, .4); }
-.an-toggle.on .an-knob { left: 17px; }
-.an-cmp-period { position: relative; margin-left: auto; }
-.an-chipbtn { display: inline-flex; align-items: center; gap: 8px; background: var(--surface-2); border: 1px solid var(--border); border-radius: 9px; color: var(--text-secondary); font: inherit; font-size: 13px; padding: 8px 13px; cursor: pointer; }
-.an-chipbtn:hover { border-color: var(--accent); }
-.an-chipbtn b { color: var(--text-primary); font-weight: 700; }
-.an-seglegend { display: flex; flex-wrap: wrap; gap: 11px; }
-.an-seg { display: inline-flex; align-items: center; gap: 10px; padding: 8px 14px 8px 12px; border-radius: 12px; border: 1px solid var(--border); background: var(--surface-2); cursor: pointer; font: inherit; transition: .15s; }
-.an-seg.off { opacity: .45; }
-.an-swatch { width: 12px; height: 12px; border-radius: 4px; flex-shrink: 0; }
-.an-seg-txt { display: flex; flex-direction: column; align-items: flex-start; gap: 1px; min-width: 0; }
-.an-seg-name { font-size: 13.5px; font-weight: 700; color: var(--text-primary); letter-spacing: -.01em; }
-.an-seg-field { font-size: 10.5px; font-family: ui-monospace, Consolas, monospace; color: var(--text-muted); }
-.an-seg-latest { display: flex; align-items: baseline; gap: 5px; margin-left: 8px; }
-.an-seg-latest b { font-size: 16px; font-weight: 800; color: var(--text-primary); letter-spacing: -.02em; font-variant-numeric: tabular-nums; }
-.an-delta { font-size: 11.5px; font-weight: 700; color: var(--text-muted); white-space: nowrap; }
-.an-empty-note { font-size: 13px; color: var(--text-muted); padding: 8px 0; }
-.an-panel { border: 1px solid var(--border); border-radius: 16px; background: var(--surface); }
-.an-panel-hd { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; padding: 20px 22px 10px; }
-.an-panel-title { display: flex; align-items: center; gap: 10px; font-size: 12px; font-weight: 800; letter-spacing: .09em; text-transform: uppercase; color: var(--text-secondary); }
-.an-badge { font-size: 11px; font-weight: 600; letter-spacing: 0; text-transform: none; color: var(--text-muted); background: var(--surface-2); border: 1px solid var(--border); border-radius: 6px; padding: 2px 9px; }
-.an-prevhint { display: flex; align-items: center; gap: 8px; font-size: 11.5px; color: var(--text-muted); }
-.an-prevhint i { width: 14px; border-top: 2px dashed var(--text-muted); }
-.an-panel .an-chart { height: 400px; padding: 0 12px 14px; }
-.an-table-hd { display: flex; align-items: center; justify-content: space-between; padding: 15px 20px; border-bottom: 1px solid var(--border); font-size: 12px; font-weight: 800; letter-spacing: .08em; text-transform: uppercase; color: var(--text-secondary); }
-.an-table-hd span { font-size: 11.5px; font-weight: 500; letter-spacing: 0; text-transform: none; color: var(--text-muted); }
-.an-tbl { width: 100%; border-collapse: collapse; }
-.an-tbl th { font-size: 11px; font-weight: 700; letter-spacing: .04em; text-transform: uppercase; color: var(--text-muted); text-align: right; padding: 11px 14px; border-bottom: 1px solid var(--border); white-space: nowrap; }
-.an-tbl th:first-child, .an-tbl td:first-child { text-align: left; padding-left: 20px; }
-.an-tbl th.c, .an-tbl td.c { text-align: center; }
-.an-tbl td { padding: 14px; border-bottom: 1px solid var(--border); text-align: right; font-size: 13.5px; color: var(--text-secondary); font-variant-numeric: tabular-nums; white-space: nowrap; }
-.an-tbl tr:last-child td { border-bottom: 0; }
-.an-tbl td b { color: var(--text-primary); font-weight: 700; }
-.an-tbl tr.off { opacity: .4; }
-.an-tbl td.c svg { display: inline-block; vertical-align: middle; }
-.an-segcell { display: flex; align-items: center; gap: 11px; }
-.an-chg { display: flex; align-items: center; justify-content: flex-end; gap: 6px; }
-.an-chg .an-delta { font-size: 13px; font-weight: 800; }
-.an-chg .pill { font-size: 11px; font-weight: 700; border-radius: 6px; padding: 2px 7px; background: var(--surface-2); }
+	•	Add a Tuning stage after Pending Client Approval, for cases where the review finds changes WakeMed needs to incorporate.
+	•	Record who is responsible for each stage and for approval, by capturing the name of the person who updates the status.
 
-@media (max-width: 1100px) {
-  .an-head-grid { grid-template-columns: 1fr; gap: 18px; }
-  .an-stats { grid-template-columns: repeat(4, minmax(0, 1fr)); row-gap: 10px; }
-}
-@media (max-width: 760px) {
-  .an-main { flex-direction: column; }
-  .an-drawer.open { width: 100%; margin: 0 0 12px; }
-  .an-drawer-in { width: 100%; }
-  .an-search, .an-search .input { width: 100%; }
-  .an-search { flex: 1 1 100%; }
-  .an-tb-actions { margin-left: 0; }
-  .an-chart, .an-panel .an-chart { height: 320px; }
-  .dp { flex-direction: column; }
-  .dp-presets { flex-direction: row; flex-wrap: wrap; border-right: 0; border-bottom: 1px solid var(--border); }
-  .dp-cals { flex-direction: column; }
-  .an-tbl-wrap { overflow-x: auto; }
-}
+Updated status stages:
+Build → Testing → Pending Client Approval → Tuning → Approved → Deployed to Production → Validate
+
+Stage	Purpose
+Build	Threat hunter creates the record and documents the hunt
+Testing	Query is tested and the record details completed
+Pending Client Approval	Client reviews the hunt
+Tuning	Changes from the client review are incorporated (optional; only if the review finds changes)
+Approved	Client has signed off
+Deployed to Production	Hunt is live in its execution environment
+Validate	Deployed hunt is confirmed to be running and alerting as expected
+
+Acceptance criteria
+
+	•	☐ The Status field contains exactly these values, in this order: Build, Testing, Pending Client Approval, Tuning, Approved, Deployed to Production, Validate.
+	•	☐ The old combined value "Testing / Tuning" is replaced by separate Testing and Tuning values.
+	•	☐ Existing records using "Testing / Tuning" are moved to the correct new value.
+	•	☐ A Status Updated By field (Swimlane user, read-only) is set automatically to the user who changed the status.
+	•	☐ A Status Updated On field (date/time, read-only) is set automatically when the status changes.
+	•	☐ Both fields are shown in the record header next to Status.
+	•	☐ Workflow conditions (Rule Execution, required fields, read-only) are updated for the new Testing, Tuning and Validate values.
+	•	☐ Rule Execution is Enabled only when Status is Deployed to Production or Validate and Execution Environment is Swimlane Detection Rule.
+
+Other information
+
+	•	Tuning is optional. A record can go straight from Pending Client Approval to Approved when no changes are needed. After tuning, it goes to Approved, or back to Pending Client Approval if the client needs to review it again.
+	•	Who updated the status is captured on every change. The full history of changes is in the History/Audit field.
+	•	Out of scope (phase 2): a Retired stage, a Last Reviewed date, field locking by role, and Critical and Low hunts.
+
+Two things to confirm with Will before you post it:
+
+	1.	What Validate means. I've assumed post-deployment confirmation that the hunt is running and alerting.
+	2.	Where a tuned hunt goes next: straight to Approved, or back to Pending Client Approval.
