@@ -450,13 +450,21 @@ def flatten(node):
     process = node.get("process") or {}
     pfile = (process.get("file") or {}) if isinstance(process, dict) else {}
 
+    # Observed on a live tenant: the alert carries analytics, a detectionTime
+    # object holding the account/group/site scope, and primaryIndicatorType.
+    # None of these were in the hand-written query.
+    analytics = node.get("analytics") or {}
+    detection_time = node.get("detectionTime") or {}
+    attacker = (detection_time.get("attacker") or {}) if isinstance(detection_time, dict) else {}
+    cloud_scope = (attacker.get("scope") or {}) if isinstance(attacker, dict) else {}
+
     flat = {key: node.get(key) for key in (
         "id", "name", "description", "status", "severity", "analystVerdict",
         "classification", "confidenceLevel", "externalId", "storylineId",
         "attackSurfaces", "dataSources", "labels", "detectedAt", "createdAt",
         "updatedAt", "firstSeenAt", "lastSeenAt", "noteExists", "fileHash",
         "fileName", "exclusionHash", "ticketId", "result", "attackPathExists",
-        "availableActionIds", "aiInvestigationStatus")}
+        "availableActionIds", "aiInvestigationStatus", "primaryIndicatorType")}
 
     flat.update({
         "assetId": asset.get("id"),
@@ -482,7 +490,34 @@ def flatten(node):
         "processFileName": pfile.get("name"),
         "processFilePath": pfile.get("path"),
         "processSha256": pfile.get("sha256"),
+        # The rule that fired.
+        "analyticsCategory": analytics.get("category"),
+        "analyticsName": analytics.get("name"),
+        "analyticsType": analytics.get("typeValue"),
+        "analyticsUid": analytics.get("uid"),
+        # Which account, group and site the alert belongs to - the fields a
+        # multi-tenant console needs to route an alert to the right queue.
+        "accountId": cloud_scope.get("accountId"),
+        "accountName": cloud_scope.get("accountName"),
+        "groupId": cloud_scope.get("groupId"),
+        "groupName": cloud_scope.get("groupName"),
+        "siteId": cloud_scope.get("siteId"),
+        "siteName": cloud_scope.get("siteName"),
+        # Asset detail beyond id and name.
+        "assetSubcategory": asset.get("subcategory"),
+        "assetTypeClassifier": asset.get("assetTypeClassifier"),
+        "assetRole": asset.get("role"),
+        "assetOrigin": asset.get("origin"),
+        "assetOsVersion": asset.get("osVersion"),
+        "assetLastLoggedInUser": asset.get("lastLoggedInUser"),
     })
+
+    # tags sit on the asset, not on the alert - the hand-written query asked
+    # for them at the top level, which is the field that failed validation.
+    asset_tags = asset.get("tags") if isinstance(asset, dict) else None
+    flat["assetTags"] = ", ".join(
+        "{}={}".format(t.get("key"), t.get("value"))
+        for t in (asset_tags or []) if isinstance(t, dict))
 
     # Lists of objects are joined rather than dropped, so a text field can hold
     # them and nothing silently disappears.
@@ -697,8 +732,26 @@ def main():
     return result
 
 
-outputs = main()
-try:
-    sw_outputs.update(outputs)
-except NameError:
-    pass
+def publish(result):
+    """Hand the result back, however this build exposes the sink.
+
+    sw_outputs is a dict in some Swimlane versions and a list in others, and
+    the run is already finished by the time it is written - so a mismatch here
+    must never turn a successful sync into a failed task.
+    """
+    scope = globals()
+    sink = scope.get("sw_outputs")
+    try:
+        if isinstance(sink, dict):
+            sink.update(result)
+        elif isinstance(sink, list):
+            sink.append(result)
+        else:
+            scope["sw_outputs"] = dict(result)
+    except Exception as error:
+        print("could not publish outputs ({}); the run itself succeeded"
+              .format(error))
+    return result
+
+
+outputs = publish(main())
