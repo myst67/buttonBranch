@@ -112,6 +112,16 @@ max_pages = int(_input("max_pages", 10))
 
 API_URL = "{}/web/api/v2.1/unifiedalerts/graphql".format(console_url)
 
+# Printed every run. A 404 here is almost always the URL rather than the
+# token, and the only way to tell is to see the one that was actually called -
+# a base URL that already carries the path doubles it.
+print("POST {}".format(API_URL))
+if API_URL.count("/web/api/") > 1:
+    raise ValueError(
+        "The API path appears twice in {!r}. s1_console_url takes the console's "
+        "base address only, e.g. https://your-tenant.sentinelone.net - the path "
+        "is appended for you.".format(API_URL))
+
 HEADERS = {
     "Content-Type": "application/json",
     "Accept": "application/json",
@@ -212,9 +222,23 @@ def call_api(after=None):
             last_error = "{}: {}".format(status, response.text[:300])
 
         if status not in RETRY_ON and status != 0:
-            raise RuntimeError("SentinelOne returned {}. Not retryable - check "
-                               "the token, the console URL and the query. {}"
-                               .format(status, last_error))
+            # 404 against an HTML body means the path is wrong, not the token:
+            # the API answers JSON even when it rejects you. Say which it is,
+            # rather than listing every possible cause.
+            html = "<html" in (last_error or "").lower()
+            if status == 404 and html:
+                hint = ("Nothing is served at this path. The response is a web "
+                        "server's own error page, not the API. Check "
+                        "s1_console_url is the console base address with no path, "
+                        "and that this tenant exposes "
+                        "/web/api/v2.1/unifiedalerts/graphql.")
+            elif status in (401, 403):
+                hint = ("The path is right but the token was rejected. Check "
+                        "sentinelone_api_token and the role behind it.")
+            else:
+                hint = "Check the token, the console URL and the query."
+            raise RuntimeError("POST {} returned {}. {} Body: {}"
+                               .format(API_URL, status, hint, (last_error or "")[:300]))
 
         if attempt == MAX_ATTEMPTS:
             break
