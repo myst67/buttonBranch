@@ -67,6 +67,10 @@ FIELD_MAP = {
     "fileName": "File_Name",
     "fileHash": "File Hash",
     "ticketId": "Ticket ID",
+    # Commented out in the original because a null timestamp crashed the run.
+    # to_datetime() returns None for those now, so they can come back.
+    "firstSeenAt": "First Seen At",
+    "lastSeenAt": "Last Seen At",
     "noteExists": "Note Exists",
     "detectionProduct": "Detection Product",
     "detectionVendor": "Detection Vendor",
@@ -639,10 +643,19 @@ def app_field_names(app):
 # Writing
 # ======================================================================
 
+#: Fields the application rejected. Populated at runtime from the first write
+#: that names one, so a wrong entry in FIELD_MAP costs one retry rather than
+#: every alert in the window - which matters when the field list is not known
+#: in advance and the SDK will not report it.
+UNKNOWN_FIELDS = set()
+
+
 def payload_for(flat, field_names):
     """The FIELD_MAP pairs this alert can actually fill."""
     values = {}
     for key, field in FIELD_MAP.items():
+        if field in UNKNOWN_FIELDS:
+            continue
         if field_names and field not in field_names:
             continue                       # reported by discovery, skipped here
         raw = flat.get(key)
@@ -650,6 +663,19 @@ def payload_for(flat, field_names):
         if value is not None:
             values[field] = value
     return values
+
+
+def blame_fields(error, values):
+    """Which of these field names the error mentions.
+
+    The SDK does not hand back a structured "unknown field" error, but it does
+    put the name in the message. Matching against the names actually sent is
+    safer than parsing the text, and a false positive only costs one field.
+    """
+    text = str(error)
+    named = {field for field in values if field and field in text}
+    UNKNOWN_FIELDS.update(named)
+    return named
 
 
 def upsert(app, flat, field_names):
@@ -668,7 +694,21 @@ def upsert(app, flat, field_names):
 
     existing = list(app.records.search((KEY_FIELD, EQ, alert_id)))
     if not existing:
-        app.records.create(**values)
+        try:
+            app.records.create(**values)
+        except Exception as error:
+            named = blame_fields(error, values)
+            if not named:
+                raise
+            # The application named a field it does not have. Drop it and try
+            # once more: every later alert skips it too, so the cost is one
+            # retry for the whole run rather than one failure per alert.
+            print("  dropping field(s) the application rejected: {}"
+                  .format(", ".join(sorted(named))))
+            retry = {k: v for k, v in values.items() if k not in named}
+            if not retry:
+                raise
+            app.records.create(**retry)
         return "created"
 
     record = existing[0]
@@ -724,10 +764,16 @@ def main():
     print("\n{} alert(s): {created} created, {updated} updated, "
           "{unchanged} unchanged, {skipped} skipped, {failed} failed"
           .format(len(alerts), **counts))
+    if UNKNOWN_FIELDS:
+        # The real field list, learned the hard way. Remove these from
+        # FIELD_MAP, or add them to the application.
+        print("the application does not have: {}"
+              .format(", ".join(sorted(UNKNOWN_FIELDS))))
     for line in failures[:20]:
         print("  FAILED {}".format(line))
 
-    result = {"mode": "sync", "alerts_seen": len(alerts), "failures": failures[:20]}
+    result = {"mode": "sync", "alerts_seen": len(alerts), "failures": failures[:20],
+              "unknown_fields": sorted(UNKNOWN_FIELDS)}
     result.update(counts)
     return result
 
