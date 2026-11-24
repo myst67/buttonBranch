@@ -77,6 +77,27 @@ FIELD_MAP = {
 #: Keys whose value is an ISO timestamp and must reach Swimlane as a datetime.
 DATE_KEYS = {"detectedAt", "createdAt", "updatedAt", "firstSeenAt", "lastSeenAt"}
 
+#: Build the query from the schema the console actually exposes, rather than
+#: from a fixed list. GraphQL rejects the whole query when one field is
+#: undefined and names only the first, so a hand-written selection costs a
+#: round trip per missing field. Set False to use STATIC_QUERY_FIELDS below.
+AUTO_QUERY = True
+
+#: How deep to follow object fields when building the selection. 2 covers
+#: assets, detectionSource, process.file and the rest; deeper risks a very
+#: large response for little gain.
+AUTO_QUERY_DEPTH = 2
+
+#: Used only when AUTO_QUERY is False, or introspection is not permitted.
+STATIC_QUERY_FIELDS = """
+  id name description status severity analystVerdict classification
+  confidenceLevel externalId storylineId detectedAt createdAt updatedAt
+  firstSeenAt lastSeenAt noteExists fileHash fileName ticketId
+  assets { id name osType status category type agentUuid agentVersion }
+  detectionSource { engine product vendor }
+  assignee { userId fullName email }
+"""
+
 #: Status codes worth calling again. 429 is the rate limit; the 5xx entries are
 #: transient. A 4xx other than 429 will fail again identically.
 RETRY_ON = {429, 500, 502, 503, 504}
@@ -141,62 +162,101 @@ end_ms = int(end_time.timestamp() * 1000)
 # The query
 # ======================================================================
 
-QUERY = """
+def build_query(node_fields):
+    """The listAlerts query, around whatever selection the schema allows."""
+    return """
 query listAlerts($filters: [FilterInput!], $sortBy: String!, $sortOrder: SortOrderType!,
                  $first: Int, $after: String) {
   alerts(filters: $filters, sort: {by: $sortBy, order: $sortOrder},
          first: $first, after: $after) {
     totalCount
     pageInfo { hasNextPage endCursor }
-    edges {
-      cursor
-      node {
-        id name description status severity analystVerdict classification
-        confidenceLevel externalId storylineId attackSurfaces dataSources labels
-        detectedAt createdAt updatedAt firstSeenAt lastSeenAt noteExists
-        fileHash fileName exclusionHash exclusionHashes { sha1 sha256 }
-        ticketId result attackPathExists attackPaths { id name }
-        availableActionIds
-        assignee { userId fullName email }
-        detectionSource { engine product vendor }
-        incident { id name }
-        resolveData { resolvedAt resolvedDuration }
-        aiInvestigationStatus
-        aiInvestigation { autoTriggered purpleAiStatus status timestamp verdict }
-        tags { key keyValue type value }
-        assets { id name osType status category type agentUuid agentVersion }
-        process { cmdLine parentName file { name path md5 sha1 sha256 certSubject } }
-      }
+    edges { cursor node { %s } }
+  }
+}
+""" % node_fields
+
+
+INTROSPECT = """
+query IntrospectType($name: String!) {
+  __type(name: $name) {
+    name
+    fields {
+      name
+      args { name type { kind name ofType { kind name } } }
+      type { kind name ofType { kind name ofType { kind name ofType { kind name } } } }
     }
   }
 }
 """
 
 
-def call_api(after=None):
-    """One page of alerts, retrying the transient failures.
+def base_type(node):
+    """Unwrap NON_NULL and LIST to the kind and name underneath."""
+    kind, name = None, None
+    while isinstance(node, dict):
+        kind, name = node.get("kind"), node.get("name")
+        if kind in ("NON_NULL", "LIST"):
+            node = node.get("ofType")
+            continue
+        break
+    return kind, name
+
+
+def needs_arguments(field):
+    """True when a field cannot be selected without supplying an argument."""
+    for arg in field.get("args") or []:
+        kind, _ = arg.get("type", {}).get("kind"), None
+        if arg.get("type", {}).get("kind") == "NON_NULL":
+            return True
+    return False
+
+
+_type_cache = {}
+
+
+def type_fields(name, post):
+    if name not in _type_cache:
+        payload = post(INTROSPECT, {"name": name})
+        info = (payload.get("data") or {}).get("__type") or {}
+        _type_cache[name] = info.get("fields") or []
+    return _type_cache[name]
+
+
+def selection_for(type_name, post, depth=0, seen=None):
+    """Every selectable field on a type, following objects to AUTO_QUERY_DEPTH.
+
+    Fields requiring an argument are skipped: they cannot be selected bare, and
+    guessing an argument is how a query starts returning the wrong thing.
+    """
+    seen = set(seen or ())
+    if type_name in seen:
+        return ""
+    seen.add(type_name)
+
+    parts = []
+    for field in type_fields(type_name, post):
+        if needs_arguments(field):
+            continue
+        kind, name = base_type(field.get("type"))
+        if kind in ("SCALAR", "ENUM"):
+            parts.append(field["name"])
+        elif kind in ("OBJECT", "INTERFACE") and depth < AUTO_QUERY_DEPTH and name:
+            inner = selection_for(name, post, depth + 1, seen)
+            if inner:
+                parts.append("{} {{ {} }}".format(field["name"], inner))
+    return " ".join(parts)
+
+
+def post_graphql(query, variables):
+    """One GraphQL call, retrying the transient failures.
 
     The original called response.json() straight off the request. A 429 or a
     gateway error returns a body that is not the expected shape - sometimes not
     JSON at all - so the failure surfaced as a confusing parse error rather
     than as the rate limit it was.
     """
-    variables = {
-        "filters": [{
-            "fieldId": "createdAt",
-            "dateTimeRange": {
-                "start": start_ms, "end": end_ms,
-                "startInclusive": True, "endInclusive": True,
-            },
-        }],
-        "sortBy": "createdAt",
-        "sortOrder": "DESC",
-        "first": page_size,
-    }
-    if after:
-        variables["after"] = after
-
-    body = {"query": QUERY, "variables": variables}
+    body = {"query": query, "variables": variables}
     last_error = None
 
     for attempt in range(1, MAX_ATTEMPTS + 1):
@@ -215,9 +275,11 @@ def call_api(after=None):
                     raise RuntimeError(
                         "{} but the body was not JSON. First 300 characters: {}"
                         .format(status, response.text[:300]))
-                # GraphQL reports its own errors inside a 200.
+                # GraphQL reports its own errors inside a 200. A validation
+                # error names one undefined field at a time, so say which and
+                # point at the setting that stops it recurring.
                 if payload.get("errors"):
-                    raise RuntimeError("GraphQL errors: {}".format(payload["errors"]))
+                    raise RuntimeError(graphql_message(payload["errors"]))
                 return payload
             last_error = "{}: {}".format(status, response.text[:300])
 
@@ -261,6 +323,71 @@ def call_api(after=None):
                        .format(MAX_ATTEMPTS, last_error))
 
 
+def graphql_message(errors):
+    """A GraphQL error list, read back as something actionable."""
+    lines = []
+    for error in errors if isinstance(errors, list) else [errors]:
+        message = (error or {}).get("message", str(error))
+        lines.append(message)
+    text = " | ".join(lines)
+    if "FieldUndefined" in text or "is undefined" in text:
+        text += ("  --  this field is not on your console's schema. With "
+                 "AUTO_QUERY = True the query is built from the schema itself "
+                 "and this cannot happen; check that introspection is enabled "
+                 "for this token.")
+    return "GraphQL errors: {}".format(text)
+
+
+def fetch_page(after=None):
+    """One page of alerts."""
+    variables = {
+        "filters": [{
+            "fieldId": "createdAt",
+            "dateTimeRange": {
+                "start": start_ms, "end": end_ms,
+                "startInclusive": True, "endInclusive": True,
+            },
+        }],
+        "sortBy": "createdAt",
+        "sortOrder": "DESC",
+        "first": page_size,
+    }
+    if after:
+        variables["after"] = after
+    return post_graphql(QUERY, variables)
+
+
+#: Set once by resolve_query() before the first page is fetched.
+QUERY = None
+
+
+def resolve_query():
+    """The node selection this console will actually accept.
+
+    Introspection is the only way to know, and it is cheap: one call, cached.
+    If the token is not allowed to introspect, fall back to the static list and
+    say so, rather than failing before a single alert is read.
+    """
+    if not AUTO_QUERY:
+        print("AUTO_QUERY off: using the static field list.")
+        return build_query(STATIC_QUERY_FIELDS)
+    try:
+        selection = selection_for("UnifiedAlert", post_graphql)
+    except Exception as error:
+        print("Could not introspect the schema ({}); falling back to the "
+              "static field list. If this run then fails on an undefined "
+              "field, remove it from STATIC_QUERY_FIELDS.".format(error))
+        return build_query(STATIC_QUERY_FIELDS)
+    if not selection:
+        print("Introspection returned no fields for UnifiedAlert; falling back "
+              "to the static field list.")
+        return build_query(STATIC_QUERY_FIELDS)
+    print("schema: built the selection from UnifiedAlert itself "
+          "({} characters). No field in it can be undefined."
+          .format(len(selection)))
+    return build_query(selection)
+
+
 def fetch_alerts():
     """Every alert in the window, following the cursor.
 
@@ -270,7 +397,7 @@ def fetch_alerts():
     nodes, cursor, pages, total = [], None, 0, None
 
     while pages < max_pages:
-        payload = call_api(cursor)
+        payload = fetch_page(cursor)
         alerts = (payload.get("data") or {}).get("alerts") or {}
         if total is None:
             total = alerts.get("totalCount")
@@ -529,10 +656,13 @@ def upsert(app, flat, field_names):
 # ======================================================================
 
 def main():
+    global QUERY
+
     swimlane = Swimlane(sw_context.config["InternalSwimlaneUrl"],
                         swimlane_user, swimlane_pwd, verify_ssl=False)
     app = swimlane.apps.get(name=app_name)
 
+    QUERY = resolve_query()
     alerts = fetch_alerts()
 
     if DISCOVERY:
