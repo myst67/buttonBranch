@@ -854,10 +854,16 @@ def describe(alerts, app):
     except Exception as error:
         print("  could not read FilterInput ({})".format(error))
 
-    print("\n=== fields on '{}' ===".format(app_name))
+    print("\n=== fields on '{}' (display name <- key) ===".format(app_name))
+    pairs = field_pairs(app)
+    if pairs:
+        for name, key in pairs:
+            print("  {:<34} {}".format(name, key or "(no key reported)"))
+        print("  FIELD_MAP must use the display name on the left. A key on the "
+              "right is accepted by records.create and silently ignored.")
+    else:
+        print("  could not read the field list from this SDK version")
     names = app_field_names(app)
-    print("  " + (", ".join(names) if names else
-                  "could not read the field list from this SDK version"))
 
     if names:
         missing = [(k, v) for k, v in FIELD_MAP.items() if v not in names]
@@ -874,19 +880,53 @@ def describe(alerts, app):
             print("    " + ", ".join(unmapped))
 
 
-def app_field_names(app):
-    """Field names, however this SDK version exposes them."""
+def field_pairs(app):
+    """(display name, key) for every field, however this SDK exposes them.
+
+    An application field has both a display name and a key - "Alert ID" and
+    something like ssa.alert-id. records.create takes the display name and
+    quietly ignores anything else, so a key in FIELD_MAP writes nothing and
+    raises nothing: the field just stays empty.
+    """
+    pairs = []
     for attribute in ("field_definitions", "_fields_by_name", "fields"):
         value = getattr(app, attribute, None)
         if isinstance(value, dict):
-            return sorted(value.keys())
-        if isinstance(value, (list, tuple)):
-            names = [getattr(f, "name", None) or (
-                f.get("name") if isinstance(f, dict) else None) for f in value]
-            names = [n for n in names if n]
-            if names:
-                return sorted(names)
-    return []
+            for name, definition in value.items():
+                key = None
+                if isinstance(definition, dict):
+                    key = definition.get("key") or definition.get("id")
+                else:
+                    key = getattr(definition, "key", None) or getattr(definition, "id", None)
+                pairs.append((name, key))
+        elif isinstance(value, (list, tuple)):
+            for definition in value:
+                if isinstance(definition, dict):
+                    name = definition.get("name")
+                    key = definition.get("key") or definition.get("id")
+                else:
+                    name = getattr(definition, "name", None)
+                    key = getattr(definition, "key", None) or getattr(definition, "id", None)
+                if name:
+                    pairs.append((name, key))
+        if pairs:
+            return sorted(pairs)
+    return pairs
+
+
+def app_field_names(app):
+    """Just the display names."""
+    return sorted({name for name, _ in field_pairs(app) if name})
+
+
+def key_to_name(app):
+    """Field key -> display name, so either can be used in FIELD_MAP."""
+    mapping = {}
+    for name, key in field_pairs(app):
+        if key and name:
+            mapping[str(key)] = name
+            mapping[str(key).lower()] = name
+    return mapping
 
 
 # ======================================================================
@@ -900,10 +940,26 @@ def app_field_names(app):
 UNKNOWN_FIELDS = set()
 
 
+#: Field key -> display name, filled once from the application. A FIELD_MAP
+#: entry naming a key is translated through this before the write.
+KEY_NAMES = {}
+
+
+def resolve_field(field):
+    """The display name for a FIELD_MAP target, whether it named one or a key."""
+    if field in KEY_NAMES:
+        return KEY_NAMES[field]
+    lowered = str(field).lower()
+    if lowered in KEY_NAMES:
+        return KEY_NAMES[lowered]
+    return field
+
+
 def payload_for(flat, field_names):
     """The FIELD_MAP pairs this alert can actually fill."""
     values = {}
     for key, field in FIELD_MAP.items():
+        field = resolve_field(field)
         if field in UNKNOWN_FIELDS:
             continue
         if field_names and field not in field_names:
@@ -928,6 +984,36 @@ def blame_fields(error, values):
     return named
 
 
+#: Fields the application accepted without storing anything. Reported once at
+#: the end rather than per alert.
+SILENT_FIELDS = set()
+
+
+def verify_written(record, values, alert_id):
+    """Check the values actually landed on the record.
+
+    records.create ignores a name it does not recognise instead of raising, so
+    a field key used where a display name was wanted writes nothing and
+    reports nothing. Reading the record back is the only way to catch it.
+    """
+    if record is None:
+        return
+    for field, sent in values.items():
+        if field in SILENT_FIELDS:
+            continue
+        try:
+            stored = record[field]
+        except Exception:
+            # The name is not addressable on the record either: same problem.
+            SILENT_FIELDS.add(field)
+            continue
+        if sent not in (None, "") and stored in (None, ""):
+            SILENT_FIELDS.add(field)
+            print("  {}: {!r} was accepted but stored nothing - it is probably "
+                  "a field key where the display name is wanted"
+                  .format(alert_id, field))
+
+
 def upsert(app, flat, field_names):
     """Create the record, or update the one already holding this alert id.
 
@@ -945,7 +1031,8 @@ def upsert(app, flat, field_names):
     existing = list(app.records.search((KEY_FIELD, EQ, alert_id)))
     if not existing:
         try:
-            app.records.create(**values)
+            created = app.records.create(**values)
+            verify_written(created, values, alert_id)
         except Exception as error:
             named = blame_fields(error, values)
             if not named:
@@ -958,7 +1045,8 @@ def upsert(app, flat, field_names):
             retry = {k: v for k, v in values.items() if k not in named}
             if not retry:
                 raise
-            app.records.create(**retry)
+            created = app.records.create(**retry)
+            verify_written(created, retry, alert_id)
         return "created"
 
     record = existing[0]
@@ -996,6 +1084,8 @@ def main():
               "the lists above, set DISCOVERY = False, and run again.")
         return {"mode": "discovery", "alerts_seen": len(alerts)}
 
+    global KEY_NAMES
+    KEY_NAMES = key_to_name(app)
     field_names = app_field_names(app)
     counts = {"created": 0, "updated": 0, "unchanged": 0, "skipped": 0,
               "failed": 0, "excluded": 0}
@@ -1028,11 +1118,15 @@ def main():
         # FIELD_MAP, or add them to the application.
         print("the application does not have: {}"
               .format(", ".join(sorted(UNKNOWN_FIELDS))))
+    if SILENT_FIELDS:
+        print("accepted but stored nothing (use the display name, not the key): "
+              "{}".format(", ".join(sorted(SILENT_FIELDS))))
     for line in failures[:20]:
         print("  FAILED {}".format(line))
 
     result = {"mode": "sync", "alerts_seen": len(alerts), "failures": failures[:20],
               "unknown_fields": sorted(UNKNOWN_FIELDS),
+              "silent_fields": sorted(SILENT_FIELDS),
               "excluded_by": excluded_by}
     result.update(counts)
     return result
