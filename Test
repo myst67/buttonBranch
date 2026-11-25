@@ -112,6 +112,13 @@ FIELD_MAP = {
     "slaRespondMinutes": ("SLA Time Respond", "sla-time-respond"),
     "slaResolveMinutes": ("SLA Time Resolve", "sla-time-resolve"),
     "sevTag": ("Sev Tag", "sev-tag"),
+    "tiTag": ("Ti Tag", "TI Tag", "ti-tag"),
+    "tiType": ("Ti Type", "TI Type", "ti-type"),
+
+    # Verdict and outcome, which drive the tags above and are worth storing
+    # in their own right.
+    "result": ("Result", "result"),
+    "analystVerdict": ("Analyst Verdict", "analyst-verdict"),
 }
 
 if DETAILS_FIELD:
@@ -175,11 +182,31 @@ SLA_MINUTES = {
     "info": {"respond": None, "resolve": None},
 }
 
-#: severity -> the tag your process uses for it. Also policy.
+#: severity -> Sev Tag. This is a SELECTION field on the application, and a
+#: selection field ignores anything that is not already one of its options -
+#: no error, no value. So these must match the dropdown's entries exactly,
+#: including their casing. The ones below mirror what the field displays;
+#: change them if your options are named differently.
 SEVERITY_TAGS = {
-    "critical": "SEV1", "high": "SEV2", "medium": "SEV3",
-    "low": "SEV4", "info": "SEV5",
+    "critical": "Critical", "high": "High", "medium": "Medium",
+    "low": "Low", "info": "Info",
 }
+
+#: SentinelOne's verdict -> ti-tag, also a selection field. result is BENIGN
+#: on a resolved false positive; analystVerdict carries the analyst's own call
+#: where one was made, and is preferred when both exist.
+TI_TAGS = {
+    "benign": "Benign",
+    "false_positive": "Benign",
+    "suspicious": "Suspicious",
+    "true_positive": "Malicious",
+    "malicious": "Malicious",
+    "undefined": None,
+}
+
+#: ti-type is the source this record came from - constant for every alert this
+#: script writes. Set to None to leave the field alone.
+TI_TYPE = "SentinelOne SIEM"
 
 #: How a duration is written: "minutes", "seconds" or "milliseconds".
 #: A Swimlane time-span field stores milliseconds; a numeric or text field is
@@ -896,7 +923,17 @@ def timings(node, flat):
         "slaRespondMinutes": sla.get("respond"),
         "slaResolveMinutes": sla.get("resolve"),
         "sevTag": SEVERITY_TAGS.get(severity),
+        "tiType": TI_TYPE,
     }
+
+    # The analyst's own call beats the engine's where one has been made;
+    # analystVerdict is UNDEFINED until somebody decides.
+    for source in (flat.get("analystVerdict"), flat.get("result")):
+        tag = TI_TAGS.get(str(source or "").strip().lower())
+        if tag:
+            values["tiTag"] = tag
+            break
+    values.setdefault("tiTag", None)
 
     if isinstance(slo, dict) and slo:
         for key, value in slo.items():
