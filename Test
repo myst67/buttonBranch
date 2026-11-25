@@ -35,7 +35,7 @@ from swimlane.core.search import EQ
 # ======================================================================
 
 #: True inspects and prints; False writes records. Start with True.
-DISCOVERY = True
+DISCOVERY = False
 
 #: The Swimlane application alerts are stored in. Pass app_name as an input to
 #: override it, so the same script can serve dev and prod without an edit.
@@ -137,18 +137,20 @@ if DETAILS_FIELD:
 #: A rejected filter is detected on the first call and dropped, so a wrong
 #: guess costs one retry rather than the run - EXCLUDE_SEVERITIES below still
 #: catches the alerts either way.
-#: stringEqual is the operator the original script's own commented-out example
-#: used, so it is the one shape this console is known to accept. For more than
-#: one value try stringIn: {"values": [...]}.
-SEVERITY_FILTER = {"fieldId": "severity", "stringEqual": {"value": "HIGH"}}
+#:
+#: stringEqual is the shape this console is known to accept; it is what the
+#: HIGH-only filter used. An exclusion needs a different operator, and which
+#: one this console has is not yet known - so the guess below falls back
+#: cleanly and the client-side exclusion does the work regardless.
+SEVERITY_FILTER = {"fieldId": "severity", "stringNotEqual": {"value": "INFO"}}
 
 #: Keep ONLY these severities, matched case-insensitively. An allow-list,
-#: because "high only" written as a deny-list silently lets through any
-#: severity the console adds later. Empty it to fall back to EXCLUDE_SEVERITIES.
+#: because a severity the console adds later slips through a deny-list.
+#: Empty, as here, falls back to EXCLUDE_SEVERITIES.
 #:
-#: Note that {"high"} drops CRITICAL as well. For high and above:
-#:     ONLY_SEVERITIES = {"high", "critical"}
-ONLY_SEVERITIES = {"high"}
+#: To go back to high only:  ONLY_SEVERITIES = {"high"}
+#: High and above:           ONLY_SEVERITIES = {"high", "critical"}
+ONLY_SEVERITIES = set()
 
 #: Severities to drop, used only when ONLY_SEVERITIES is empty. Informational
 #: alerts are the bulk of most consoles and each one stored is a Record Create
