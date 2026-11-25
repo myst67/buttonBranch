@@ -100,6 +100,17 @@ FIELD_MAP = {
     "assetType": ("Asset Type", "asset-type"),
     "assetOsType": ("Asset Os Type", "Asset OS Type", "asset-os-type"),
     "assetStatus": ("Asset Status", "asset-status"),
+
+    # Clock fields. The two timestamps go in as datetimes; the durations are
+    # numbers in DURATION_UNIT.
+    "detectionTime": ("Detection Time", "detection-time"),
+    "openedTime": ("Opened Time", "opened-time"),
+    "resolvedTime": ("Resolved Time", "resolved-time"),
+    "timeToDetect": ("Time To Detect", "time-to-detect"),
+    "timeToResolve": ("Time To Resolve", "time-to-resolve"),
+    "slaRespondMinutes": ("SLA Time Respond", "sla-time-respond"),
+    "slaResolveMinutes": ("SLA Time Resolve", "sla-time-resolve"),
+    "sevTag": ("Sev Tag", "sev-tag"),
 }
 
 if DETAILS_FIELD:
@@ -152,6 +163,28 @@ RAW_CHARS = 20000
 #: every nested object expanded runs to a few hundred.
 RAW_LINES = 400
 
+#: SLA targets in minutes, by severity, lowercased. These are policy: nothing
+#: in a SentinelOne alert says what your targets are, so they are declared
+#: here and the clock is measured against them.
+SLA_MINUTES = {
+    "critical": {"respond": 15, "resolve": 240},
+    "high": {"respond": 30, "resolve": 480},
+    "medium": {"respond": 120, "resolve": 1440},
+    "low": {"respond": 480, "resolve": 4320},
+    "info": {"respond": None, "resolve": None},
+}
+
+#: severity -> the tag your process uses for it. Also policy.
+SEVERITY_TAGS = {
+    "critical": "SEV1", "high": "SEV2", "medium": "SEV3",
+    "low": "SEV4", "info": "SEV5",
+}
+
+#: How a duration is written: "minutes", "seconds" or "milliseconds".
+#: A Swimlane time-span field stores milliseconds; a numeric or text field is
+#: easier to read in minutes. Match this to the field type you created.
+DURATION_UNIT = "minutes"
+
 #: Where a value really lives when the obvious key is null. The first entry
 #: that holds something wins, so the mapped field gets the value wherever the
 #: console happens to put it.
@@ -166,7 +199,8 @@ FALLBACKS = {
 }
 
 #: Keys whose value is an ISO timestamp and must reach Swimlane as a datetime.
-DATE_KEYS = {"detectedAt", "createdAt", "updatedAt", "firstSeenAt", "lastSeenAt"}
+DATE_KEYS = {"detectedAt", "createdAt", "updatedAt", "firstSeenAt", "lastSeenAt",
+             "detectionTime", "openedTime", "resolvedTime"}
 
 #: Build the query from the schema the console actually exposes, rather than
 #: from a fixed list. GraphQL rejects the whole query when one field is
@@ -735,6 +769,8 @@ def flatten(node):
                 (flat.get(s) for s in sources if flat.get(s) not in (None, "", [])),
                 flat.get(target))
 
+    flat.update(timings(node, flat))
+
     if DETAILS_FIELD:
         flat["_details"] = format_details(node)
     return flat
@@ -762,6 +798,88 @@ def format_details(node):
                 + "\n\n... truncated at {} of {} characters "
                   "(raise DETAILS_MAX_CHARS)".format(DETAILS_MAX_CHARS, len(text)))
     return text
+
+
+def aware(value):
+    """A datetime that can be subtracted from another.
+
+    to_datetime returns an aware datetime for a timestamp carrying Z or an
+    offset and a naive one otherwise. Subtracting one from the other raises,
+    so everything is pulled to UTC before any arithmetic.
+    """
+    if value is None:
+        return None
+    if value.tzinfo is None:
+        return value.replace(tzinfo=timezone.utc)
+    return value.astimezone(timezone.utc)
+
+
+def duration(start, end):
+    """end - start in DURATION_UNIT, or None if either end is missing.
+
+    A negative result is returned as None rather than as a negative duration:
+    clocks between a sensor and a console do drift, and a "time to detect" of
+    minus four seconds is noise, not a measurement.
+    """
+    first, last = aware(to_datetime(start)), aware(to_datetime(end))
+    if not first or not last:
+        return None
+    seconds = (last - first).total_seconds()
+    if seconds < 0:
+        return None
+    if DURATION_UNIT == "seconds":
+        return round(seconds, 3)
+    if DURATION_UNIT == "milliseconds":
+        return int(seconds * 1000)
+    return round(seconds / 60.0, 2)
+
+
+def timings(node, flat):
+    """The clock fields, from what the alert actually carries.
+
+    Only three timestamps are available: when the activity was first seen,
+    when SentinelOne detected it, and when the alert was created. Time to
+    detect falls out of the first two. Time to resolve needs resolveData,
+    which is null until somebody resolves the alert.
+
+    Time to respond is deliberately absent. It measures the gap to the first
+    analyst action, and nothing in this payload records when that happened -
+    analystVerdict changes but carries no timestamp. Computing it from
+    updatedAt would measure any edit, including an automated one, and a
+    plausible wrong number is worse than an empty field.
+    """
+    resolve = node.get("resolveData") or {}
+    resolved_at = resolve.get("resolvedAt")
+    severity = str(flat.get("severity") or "").strip().lower()
+    sla = SLA_MINUTES.get(severity) or {}
+
+    values = {
+        "detectionTime": flat.get("detectedAt"),
+        "openedTime": flat.get("createdAt"),
+        "resolvedTime": resolved_at,
+        # first seen -> detected: how long the activity ran before it was caught
+        "timeToDetect": duration(flat.get("firstSeenAt"), flat.get("detectedAt")),
+        # created -> resolved: the whole case, end to end
+        "timeToResolve": duration(flat.get("createdAt"), resolved_at),
+        "slaRespondMinutes": sla.get("respond"),
+        "slaResolveMinutes": sla.get("resolve"),
+        "sevTag": SEVERITY_TAGS.get(severity),
+    }
+
+    # The console's own figure, where it reports one. Kept beside ours rather
+    # than replacing it, because the two measure from different starts.
+    if resolve.get("resolvedDuration") is not None:
+        values["resolvedDurationReported"] = resolve.get("resolvedDuration")
+
+    # Whether the resolve landed inside its target, once both exist.
+    if values["timeToResolve"] is not None and sla.get("resolve"):
+        as_minutes = values["timeToResolve"]
+        if DURATION_UNIT == "seconds":
+            as_minutes = as_minutes / 60.0
+        elif DURATION_UNIT == "milliseconds":
+            as_minutes = as_minutes / 60000.0
+        values["resolveSlaMet"] = as_minutes <= sla["resolve"]
+    return values
 
 
 def excluded_reason(flat):
