@@ -78,6 +78,29 @@ FIELD_MAP = {
     "assetName": "Asset Name",
 }
 
+#: Sent to SentinelOne so informational alerts are never fetched at all - no
+#: bandwidth, no page spent on them, no record. The operator name has to match
+#: your console's FilterInput; discovery prints what it accepts, and the three
+#: shapes below are the usual ones. Set to None to filter client-side only.
+#:
+#:   {"fieldId": "severity", "stringNotIn": {"values": ["INFO"]}}
+#:   {"fieldId": "severity", "stringNotEqual": {"value": "INFO"}}
+#:   {"fieldId": "severity", "stringIn": {"values": ["LOW","MEDIUM","HIGH","CRITICAL"]}}
+#:
+#: A rejected filter is detected on the first call and dropped, so a wrong
+#: guess costs one retry rather than the run - EXCLUDE_SEVERITIES below still
+#: catches the alerts either way.
+SEVERITY_FILTER = {"fieldId": "severity", "stringNotIn": {"values": ["INFO"]}}
+
+#: Severities to drop before anything is written, matched case-insensitively.
+#: Informational alerts are the bulk of most consoles and each one stored is a
+#: Record Create Event, so excluding them here is the cheapest filter there is.
+#: Empty the set to keep everything.
+EXCLUDE_SEVERITIES = {"info", "informational"}
+
+#: Statuses to drop, same treatment. Empty by default.
+EXCLUDE_STATUSES = set()
+
 #: Keys whose value is an ISO timestamp and must reach Swimlane as a datetime.
 DATE_KEYS = {"detectedAt", "createdAt", "updatedAt", "firstSeenAt", "lastSeenAt"}
 
@@ -342,23 +365,61 @@ def graphql_message(errors):
     return "GraphQL errors: {}".format(text)
 
 
+#: Cleared when the console rejects SEVERITY_FILTER, so the retry and every
+#: later page go without it instead of failing the same way repeatedly.
+_server_filter = SEVERITY_FILTER
+
+
+def build_filters():
+    """The filters sent with each page."""
+    filters = [{
+        "fieldId": "createdAt",
+        "dateTimeRange": {
+            "start": start_ms, "end": end_ms,
+            "startInclusive": True, "endInclusive": True,
+        },
+    }]
+    if _server_filter:
+        filters.append(_server_filter)
+    return filters
+
+
 def fetch_page(after=None):
-    """One page of alerts."""
-    variables = {
-        "filters": [{
-            "fieldId": "createdAt",
-            "dateTimeRange": {
-                "start": start_ms, "end": end_ms,
-                "startInclusive": True, "endInclusive": True,
-            },
-        }],
-        "sortBy": "createdAt",
-        "sortOrder": "DESC",
-        "first": page_size,
-    }
-    if after:
-        variables["after"] = after
-    return post_graphql(QUERY, variables)
+    """One page of alerts, with the severity filter applied server-side.
+
+    If the console rejects the filter - the operator differs between versions -
+    it is dropped and the page is fetched again without it. The client-side
+    EXCLUDE_SEVERITIES check then does the same job a little later.
+    """
+    global _server_filter
+
+    def call():
+        variables = {
+            "filters": build_filters(),
+            "sortBy": "createdAt",
+            "sortOrder": "DESC",
+            "first": page_size,
+        }
+        if after:
+            variables["after"] = after
+        return post_graphql(QUERY, variables)
+
+    try:
+        return call()
+    except RuntimeError as error:
+        text = str(error)
+        rejected = _server_filter and any(
+            word in text for word in ("FilterInput", "fieldId", "severity",
+                                      "WrongType", "ValidationError",
+                                      "Unknown field", "is undefined"))
+        if not rejected:
+            raise
+        print("the console rejected the severity filter ({}); fetching without "
+              "it and excluding on this side instead. Set SEVERITY_FILTER to a "
+              "shape its FilterInput accepts - discovery prints the list."
+              .format(text[:160]))
+        _server_filter = None
+        return call()
 
 
 #: Set once by resolve_query() before the first page is fetched.
@@ -534,6 +595,24 @@ def flatten(node):
     return flat
 
 
+def excluded_reason(flat):
+    """Why this alert is not being stored, or None to store it.
+
+    Applied after fetching rather than in the query: the GraphQL filter
+    operators differ between console versions, and a filter that silently
+    matches nothing is worse than one that costs a little bandwidth. Discovery
+    prints what this schema's FilterInput accepts, so it can move server-side
+    once the operator name is known.
+    """
+    severity = str(flat.get("severity") or "").strip().lower()
+    if severity in {s.lower() for s in EXCLUDE_SEVERITIES}:
+        return "severity {}".format(flat.get("severity"))
+    status = str(flat.get("status") or "").strip().lower()
+    if status in {s.lower() for s in EXCLUDE_STATUSES}:
+        return "status {}".format(flat.get("status"))
+    return None
+
+
 def to_datetime(value):
     """An ISO timestamp as a datetime, or None.
 
@@ -603,6 +682,29 @@ def describe(alerts, app):
 
     print("\n=== keys that were null in all {} alert(s) ===".format(len(flats)))
     print("  " + (", ".join(k for k, _ in always_null) or "none"))
+
+    counts = {}
+    for f in flats:
+        key = str(f.get("severity"))
+        counts[key] = counts.get(key, 0) + 1
+    print("\n=== severity distribution ===")
+    for value, count in sorted(counts.items(), key=lambda i: -i[1]):
+        dropped = str(value).strip().lower() in {s.lower() for s in EXCLUDE_SEVERITIES}
+        print("  {:<14} {:>4}{}".format(value, count,
+                                        "   <- excluded" if dropped else ""))
+    keeping = sum(c for v, c in counts.items()
+                  if str(v).strip().lower() not in {s.lower() for s in EXCLUDE_SEVERITIES})
+    print("  EXCLUDE_SEVERITIES = {} keeps {} of {} alert(s)"
+          .format(sorted(EXCLUDE_SEVERITIES) or "nothing", keeping, len(flats)))
+
+    print("\n=== FilterInput accepts ===")
+    try:
+        names = [f.get("name") for f in type_fields("FilterInput", post_graphql)]
+        print("  " + (", ".join(n for n in names if n) or "none reported"))
+        print("  (to filter server-side instead, add a clause to fetch_page's "
+              "filters list using one of these)")
+    except Exception as error:
+        print("  could not read FilterInput ({})".format(error))
 
     print("\n=== fields on '{}' ===".format(app_name))
     names = app_field_names(app)
@@ -747,11 +849,18 @@ def main():
         return {"mode": "discovery", "alerts_seen": len(alerts)}
 
     field_names = app_field_names(app)
-    counts = {"created": 0, "updated": 0, "unchanged": 0, "skipped": 0, "failed": 0}
+    counts = {"created": 0, "updated": 0, "unchanged": 0, "skipped": 0,
+              "failed": 0, "excluded": 0}
     failures = []
+    excluded_by = {}
 
     for alert in alerts:
         flat = flatten(alert)
+        reason = excluded_reason(flat)
+        if reason:
+            counts["excluded"] += 1
+            excluded_by[reason] = excluded_by.get(reason, 0) + 1
+            continue
         try:
             counts[upsert(app, flat, field_names)] += 1
         except Exception as error:
@@ -762,8 +871,10 @@ def main():
                 flat.get("id"), type(error).__name__, error))
 
     print("\n{} alert(s): {created} created, {updated} updated, "
-          "{unchanged} unchanged, {skipped} skipped, {failed} failed"
-          .format(len(alerts), **counts))
+          "{unchanged} unchanged, {excluded} excluded, {skipped} skipped, "
+          "{failed} failed".format(len(alerts), **counts))
+    for reason, count in sorted(excluded_by.items(), key=lambda i: -i[1]):
+        print("  excluded {} on {}".format(count, reason))
     if UNKNOWN_FIELDS:
         # The real field list, learned the hard way. Remove these from
         # FIELD_MAP, or add them to the application.
@@ -773,7 +884,8 @@ def main():
         print("  FAILED {}".format(line))
 
     result = {"mode": "sync", "alerts_seen": len(alerts), "failures": failures[:20],
-              "unknown_fields": sorted(UNKNOWN_FIELDS)}
+              "unknown_fields": sorted(UNKNOWN_FIELDS),
+              "excluded_by": excluded_by}
     result.update(counts)
     return result
 
