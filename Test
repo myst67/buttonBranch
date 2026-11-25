@@ -90,12 +90,22 @@ FIELD_MAP = {
 #: A rejected filter is detected on the first call and dropped, so a wrong
 #: guess costs one retry rather than the run - EXCLUDE_SEVERITIES below still
 #: catches the alerts either way.
-SEVERITY_FILTER = {"fieldId": "severity", "stringNotIn": {"values": ["INFO"]}}
+#: stringEqual is the operator the original script's own commented-out example
+#: used, so it is the one shape this console is known to accept. For more than
+#: one value try stringIn: {"values": [...]}.
+SEVERITY_FILTER = {"fieldId": "severity", "stringEqual": {"value": "HIGH"}}
 
-#: Severities to drop before anything is written, matched case-insensitively.
-#: Informational alerts are the bulk of most consoles and each one stored is a
-#: Record Create Event, so excluding them here is the cheapest filter there is.
-#: Empty the set to keep everything.
+#: Keep ONLY these severities, matched case-insensitively. An allow-list,
+#: because "high only" written as a deny-list silently lets through any
+#: severity the console adds later. Empty it to fall back to EXCLUDE_SEVERITIES.
+#:
+#: Note that {"high"} drops CRITICAL as well. For high and above:
+#:     ONLY_SEVERITIES = {"high", "critical"}
+ONLY_SEVERITIES = {"high"}
+
+#: Severities to drop, used only when ONLY_SEVERITIES is empty. Informational
+#: alerts are the bulk of most consoles and each one stored is a Record Create
+#: Event, so excluding them is the cheapest filter there is.
 EXCLUDE_SEVERITIES = {"info", "informational"}
 
 #: Statuses to drop, same treatment. Empty by default.
@@ -605,7 +615,13 @@ def excluded_reason(flat):
     once the operator name is known.
     """
     severity = str(flat.get("severity") or "").strip().lower()
-    if severity in {s.lower() for s in EXCLUDE_SEVERITIES}:
+    if ONLY_SEVERITIES:
+        # The allow-list wins: anything not named is dropped, including a
+        # severity this console starts returning tomorrow.
+        if severity not in {s.lower() for s in ONLY_SEVERITIES}:
+            return "severity {} (not in {})".format(
+                flat.get("severity"), sorted(ONLY_SEVERITIES))
+    elif severity in {s.lower() for s in EXCLUDE_SEVERITIES}:
         return "severity {}".format(flat.get("severity"))
     status = str(flat.get("status") or "").strip().lower()
     if status in {s.lower() for s in EXCLUDE_STATUSES}:
@@ -688,14 +704,15 @@ def describe(alerts, app):
         key = str(f.get("severity"))
         counts[key] = counts.get(key, 0) + 1
     print("\n=== severity distribution ===")
+    keeping = 0
     for value, count in sorted(counts.items(), key=lambda i: -i[1]):
-        dropped = str(value).strip().lower() in {s.lower() for s in EXCLUDE_SEVERITIES}
+        dropped = excluded_reason({"severity": value}) is not None
+        keeping += 0 if dropped else count
         print("  {:<14} {:>4}{}".format(value, count,
-                                        "   <- excluded" if dropped else ""))
-    keeping = sum(c for v, c in counts.items()
-                  if str(v).strip().lower() not in {s.lower() for s in EXCLUDE_SEVERITIES})
-    print("  EXCLUDE_SEVERITIES = {} keeps {} of {} alert(s)"
-          .format(sorted(EXCLUDE_SEVERITIES) or "nothing", keeping, len(flats)))
+                                        "   <- excluded" if dropped else "   kept"))
+    rule = ("ONLY_SEVERITIES = {}".format(sorted(ONLY_SEVERITIES)) if ONLY_SEVERITIES
+            else "EXCLUDE_SEVERITIES = {}".format(sorted(EXCLUDE_SEVERITIES) or "nothing"))
+    print("  {} keeps {} of {} alert(s)".format(rule, keeping, len(flats)))
 
     print("\n=== FilterInput accepts ===")
     try:
