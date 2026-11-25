@@ -45,6 +45,21 @@ APP_NAME = "Test | SentinelOne Case Management Application"
 #: key the script de-duplicates on, so it must be unique per alert.
 KEY_FIELD = "Alert ID"
 
+#: A multi-line field on the application to hold the whole alert, formatted.
+#: Everything the API returned is stored, including the fields FIELD_MAP does
+#: not break out, so nothing is lost even where no column exists for it.
+#: Set to None to store nothing.
+DETAILS_FIELD = "ssa.sentinelone-siem-alert-details"
+
+#: How to render it: "json" indented, "paths" as one a.b.c = value per line,
+#: or "both" with the paths first and the JSON after.
+DETAILS_FORMAT = "both"
+
+#: Swimlane text fields have a size limit and a very long alert can exceed it.
+#: The text is cut at this length with a line saying so, rather than the write
+#: failing and losing the record.
+DETAILS_MAX_CHARS = 30000
+
 #: Alert key -> Swimlane field name. Only the pairs listed here are written, so
 #: an unmapped key is ignored rather than crashing the run. Fill this in from
 #: what DISCOVERY prints: the left side must match a key in the flattened
@@ -77,6 +92,10 @@ FIELD_MAP = {
     "assetId": "Asset Id",
     "assetName": "Asset Name",
 }
+
+if DETAILS_FIELD:
+    # Keyed on a name no SentinelOne field uses, so it cannot collide with one.
+    FIELD_MAP["_details"] = DETAILS_FIELD
 
 #: Sent to SentinelOne so informational alerts are never fetched at all - no
 #: bandwidth, no page spent on them, no record. The operator name has to match
@@ -681,7 +700,34 @@ def flatten(node):
     flat["attackPaths"] = ", ".join(
         str(p.get("name")) for p in (node.get("attackPaths") or [])
         if isinstance(p, dict))
+
+    if DETAILS_FIELD:
+        flat["_details"] = format_details(node)
     return flat
+
+
+def format_details(node):
+    """The whole alert as text for a multi-line field.
+
+    Stored in full rather than only the mapped fields: the console returns far
+    more than the application has columns for, and an analyst reading a record
+    should not have to go back to SentinelOne for the rest of it.
+    """
+    parts = []
+    if DETAILS_FORMAT in ("paths", "both"):
+        parts.append("\n".join(paths(node)))
+    if DETAILS_FORMAT in ("json", "both"):
+        if parts:
+            parts.append("")
+            parts.append("-" * 60)
+            parts.append("")
+        parts.append(json.dumps(node, indent=2, sort_keys=True, default=str))
+    text = "\n".join(parts)
+    if len(text) > DETAILS_MAX_CHARS:
+        text = (text[:DETAILS_MAX_CHARS]
+                + "\n\n... truncated at {} of {} characters "
+                  "(raise DETAILS_MAX_CHARS)".format(DETAILS_MAX_CHARS, len(text)))
+    return text
 
 
 def excluded_reason(flat):
@@ -769,7 +815,7 @@ def describe(alerts, app):
             break
 
     flats = [flatten(a) for a in alerts]
-    keys = sorted({k for f in flats for k in f})
+    keys = sorted({k for f in flats for k in f if k != "_details"})
     populated, always_null = [], []
     for key in keys:
         sample = next((f[key] for f in flats if f.get(key) not in (None, "", [])), None)
