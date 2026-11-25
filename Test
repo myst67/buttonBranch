@@ -107,6 +107,7 @@ FIELD_MAP = {
     "openedTime": ("Opened Time", "opened-time"),
     "resolvedTime": ("Resolved Time", "resolved-time"),
     "timeToDetect": ("Time To Detect", "time-to-detect"),
+    "timeToRespond": ("Time To Respond", "time-to-respond"),
     "timeToResolve": ("Time To Resolve", "time-to-resolve"),
     "slaRespondMinutes": ("SLA Time Respond", "sla-time-respond"),
     "slaResolveMinutes": ("SLA Time Resolve", "sla-time-resolve"),
@@ -182,8 +183,30 @@ SEVERITY_TAGS = {
 
 #: How a duration is written: "minutes", "seconds" or "milliseconds".
 #: A Swimlane time-span field stores milliseconds; a numeric or text field is
-#: easier to read in minutes. Match this to the field type you created.
+#: easier to read in minutes. Match this to the field type you created - a
+#: time-span field handed 0.51 rounds it to nothing and shows blank.
 DURATION_UNIT = "minutes"
+
+#: (start, end) for time to detect. firstSeenAt is when the activity began and
+#: detectedAt is when it was caught, which is the usual definition - but
+#: firstSeenAt is null on a good share of alerts, and the gap is then
+#: unmeasurable rather than zero.
+#:
+#: ("detectedAt", "createdAt") measures console ingest lag instead: always
+#: available, but a different thing. Choose deliberately.
+TIME_TO_DETECT_FROM = ("firstSeenAt", "detectedAt")
+
+#: (start, end) for time to respond, or None to leave it empty.
+#:
+#: There is no analyst-action timestamp in an alert. analystVerdict moves from
+#: UNDEFINED without recording when, so the honest answer is None and the gap
+#: has to be measured from the Swimlane record's own state changes instead.
+#:
+#: ("createdAt", "updatedAt") is available and tempting, and on a resolved
+#: alert updatedAt lands a second before resolvedAt - it tracks the last edit
+#: of any kind, automated ones included, so it measures time to resolve with
+#: extra steps rather than time to respond.
+TIME_TO_RESPOND_FROM = None
 
 #: Where a value really lives when the obvious key is null. The first entry
 #: that holds something wins, so the mapped field gets the value wherever the
@@ -862,7 +885,12 @@ def timings(node, flat):
         "openedTime": flat.get("createdAt"),
         "resolvedTime": resolved_at,
         # first seen -> detected: how long the activity ran before it was caught
-        "timeToDetect": duration(flat.get("firstSeenAt"), flat.get("detectedAt")),
+        "timeToDetect": duration(flat.get(TIME_TO_DETECT_FROM[0]),
+                                 flat.get(TIME_TO_DETECT_FROM[1])),
+        # Empty unless TIME_TO_RESPOND_FROM names a pair. See the setting.
+        "timeToRespond": (duration(flat.get(TIME_TO_RESPOND_FROM[0]),
+                                   flat.get(TIME_TO_RESPOND_FROM[1]))
+                          if TIME_TO_RESPOND_FROM else None),
         # created -> resolved: the whole case, end to end
         "timeToResolve": duration(flat.get("createdAt"), resolved_at),
         "slaRespondMinutes": sla.get("respond"),
@@ -1017,6 +1045,35 @@ def describe(alerts, app):
 
     print("\n=== keys that were null in all {} alert(s) ===".format(len(flats)))
     print("  " + (", ".join(k for k, _ in always_null) or "none"))
+
+    # A blank duration has two quite different causes - the timestamps it
+    # needs were missing, or it was computed and the field did not take it -
+    # and only the first is visible from here. Say which.
+    print("\n=== why a duration is blank ===")
+    total = len(flats)
+    for stamp in ("firstSeenAt", "detectedAt", "createdAt", "updatedAt",
+                  "lastSeenAt", "resolvedTime"):
+        have = sum(1 for f in flats if f.get(stamp))
+        print("  {:<16} present on {} of {} alert(s)".format(stamp, have, total))
+
+    for label, computed, sources in (
+            ("timeToDetect", "timeToDetect", TIME_TO_DETECT_FROM),
+            ("timeToRespond", "timeToRespond", TIME_TO_RESPOND_FROM),
+            ("timeToResolve", "timeToResolve", ("createdAt", "resolvedTime"))):
+        got = sum(1 for f in flats if f.get(computed) is not None)
+        if sources is None:
+            print("  {:<16} not computed - TIME_TO_RESPOND_FROM is None, and "
+                  "no alert carries an analyst-action timestamp".format(label))
+            continue
+        missing = [s for s in sources
+                   if not any(f.get(s) for f in flats)]
+        note = ""
+        if got == 0 and missing:
+            note = "  <- {} is null on every alert".format(" and ".join(missing))
+        print("  {:<16} computed on {} of {} ({} -> {}){}".format(
+            label, got, total, sources[0], sources[1], note))
+    print("  durations are written in {}; a Swimlane time-span field expects "
+          "milliseconds".format(DURATION_UNIT))
 
     counts = {}
     for f in flats:
