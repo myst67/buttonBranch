@@ -111,6 +111,15 @@ EXCLUDE_SEVERITIES = {"info", "informational"}
 #: Statuses to drop, same treatment. Empty by default.
 EXCLUDE_STATUSES = set()
 
+#: Print the first response body exactly as SentinelOne sent it, before any
+#: parsing or flattening. This is the only view that shows what the API really
+#: returned rather than what this script made of it.
+RAW_RESPONSE = True
+
+#: How much of a raw dump to print. The task log truncates eventually; raise
+#: this if an alert is cut off mid-object.
+RAW_CHARS = 20000
+
 #: Keys whose value is an ISO timestamp and must reach Swimlane as a datetime.
 DATE_KEYS = {"detectedAt", "createdAt", "updatedAt", "firstSeenAt", "lastSeenAt"}
 
@@ -285,6 +294,11 @@ def selection_for(type_name, post, depth=0, seen=None):
     return " ".join(parts)
 
 
+#: The raw dump is worth seeing once, not once per page and not for the
+#: introspection call that happens first.
+_raw_printed = False
+
+
 def post_graphql(query, variables):
     """One GraphQL call, retrying the transient failures.
 
@@ -306,6 +320,16 @@ def post_graphql(query, variables):
         else:
             status = response.status_code
             if 200 <= status < 300:
+                global _raw_printed
+                if RAW_RESPONSE and not _raw_printed:
+                    _raw_printed = True
+                    print("\n=== raw response body, as SentinelOne sent it ===")
+                    print(response.text[:RAW_CHARS])
+                    if len(response.text) > RAW_CHARS:
+                        print("... truncated at {} of {} characters; raise "
+                              "RAW_CHARS to see more"
+                              .format(RAW_CHARS, len(response.text)))
+                    print("=== end raw response ===\n")
                 try:
                     payload = response.json()
                 except ValueError:
@@ -446,9 +470,13 @@ def resolve_query():
     if not AUTO_QUERY:
         print("AUTO_QUERY off: using the static field list.")
         return build_query(STATIC_QUERY_FIELDS)
+    global _raw_printed
     try:
+        _raw_printed = True          # the schema dump is not what was asked for
         selection = selection_for("UnifiedAlert", post_graphql)
+        _raw_printed = not RAW_RESPONSE
     except Exception as error:
+        _raw_printed = not RAW_RESPONSE
         print("Could not introspect the schema ({}); falling back to the "
               "static field list. If this run then fails on an undefined "
               "field, remove it from STATIC_QUERY_FIELDS.".format(error))
@@ -680,8 +708,12 @@ def describe(alerts, app):
               "an empty window tells you nothing about the shape.")
         return
 
-    print("\n=== one raw alert, in full ===")
-    print(json.dumps(alerts[0], indent=2, default=str)[:4000])
+    print("\n=== one alert, parsed and pretty-printed ===")
+    text = json.dumps(alerts[0], indent=2, default=str)
+    print(text[:RAW_CHARS])
+    if len(text) > RAW_CHARS:
+        print("... truncated at {} of {} characters; raise RAW_CHARS"
+              .format(RAW_CHARS, len(text)))
 
     flats = [flatten(a) for a in alerts]
     keys = sorted({k for f in flats for k in f})
