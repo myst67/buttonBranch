@@ -120,6 +120,10 @@ RAW_RESPONSE = True
 #: this if an alert is cut off mid-object.
 RAW_CHARS = 20000
 
+#: How many "a.b.c = value" lines to print from the response. One alert with
+#: every nested object expanded runs to a few hundred.
+RAW_LINES = 400
+
 #: Keys whose value is an ISO timestamp and must reach Swimlane as a datetime.
 DATE_KEYS = {"detectedAt", "createdAt", "updatedAt", "firstSeenAt", "lastSeenAt"}
 
@@ -299,6 +303,59 @@ def selection_for(type_name, post, depth=0, seen=None):
 _raw_printed = False
 
 
+def paths(value, prefix=""):
+    """Every leaf in a nested structure as "a.b[0].c = value", one per line.
+
+    The task log stores stdout as a JSON string, so a pretty-printed block
+    comes back with its newlines and quotes escaped and reads as one long
+    line. A flat list of paths survives that: each line is short, and nothing
+    in it needs unescaping to be understood.
+    """
+    if isinstance(value, dict):
+        if not value:
+            yield "{} = {{}}".format(prefix or "(root)")
+        for key in sorted(value):
+            child = "{}.{}".format(prefix, key) if prefix else key
+            for line in paths(value[key], child):
+                yield line
+    elif isinstance(value, list):
+        if not value:
+            yield "{} = []".format(prefix or "(root)")
+        for index, item in enumerate(value):
+            for line in paths(item, "{}[{}]".format(prefix, index)):
+                yield line
+    else:
+        yield "{} = {!r}".format(prefix or "(root)", value)
+
+
+def dump_response(text):
+    """The response body, printed so it can actually be read in the task log."""
+    try:
+        parsed = json.loads(text)
+    except ValueError:
+        print("\n=== raw response body (not JSON) ===")
+        print(text[:RAW_CHARS])
+        print("=== end ===\n")
+        return
+
+    print("\n=== response, field by field ===")
+    shown = 0
+    for line in paths(parsed):
+        print("  " + line)
+        shown += 1
+        if shown >= RAW_LINES:
+            print("  ... stopped at {} lines; raise RAW_LINES".format(RAW_LINES))
+            break
+
+    print("\n=== the same response as indented JSON ===")
+    pretty = json.dumps(parsed, indent=2, sort_keys=True)
+    print(pretty[:RAW_CHARS])
+    if len(pretty) > RAW_CHARS:
+        print("... truncated at {} of {} characters; raise RAW_CHARS"
+              .format(RAW_CHARS, len(pretty)))
+    print("=== end response ===\n")
+
+
 def post_graphql(query, variables):
     """One GraphQL call, retrying the transient failures.
 
@@ -323,13 +380,7 @@ def post_graphql(query, variables):
                 global _raw_printed
                 if RAW_RESPONSE and not _raw_printed:
                     _raw_printed = True
-                    print("\n=== raw response body, as SentinelOne sent it ===")
-                    print(response.text[:RAW_CHARS])
-                    if len(response.text) > RAW_CHARS:
-                        print("... truncated at {} of {} characters; raise "
-                              "RAW_CHARS to see more"
-                              .format(RAW_CHARS, len(response.text)))
-                    print("=== end raw response ===\n")
+                    dump_response(response.text)
                 try:
                     payload = response.json()
                 except ValueError:
@@ -708,12 +759,14 @@ def describe(alerts, app):
               "an empty window tells you nothing about the shape.")
         return
 
-    print("\n=== one alert, parsed and pretty-printed ===")
-    text = json.dumps(alerts[0], indent=2, default=str)
-    print(text[:RAW_CHARS])
-    if len(text) > RAW_CHARS:
-        print("... truncated at {} of {} characters; raise RAW_CHARS"
-              .format(RAW_CHARS, len(text)))
+    print("\n=== one alert, field by field ===")
+    shown = 0
+    for line in paths(alerts[0]):
+        print("  " + line)
+        shown += 1
+        if shown >= RAW_LINES:
+            print("  ... stopped at {} lines; raise RAW_LINES".format(RAW_LINES))
+            break
 
     flats = [flatten(a) for a in alerts]
     keys = sorted({k for f in flats for k in f})
