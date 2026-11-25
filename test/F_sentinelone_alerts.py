@@ -210,6 +210,25 @@ TI_TAGS = {
 #: script writes. Set to None to leave the field alone.
 TI_TYPE = "SentinelOne SIEM"
 
+#: Stamp a response time when a sync first sees an alert that has been acted
+#: on, having previously seen it untouched.
+#:
+#: SentinelOne records that an analyst acted - analystVerdict leaves UNDEFINED,
+#: status leaves NEW, a note appears - but never when. The only honest reading
+#: available here is "between the previous sync and this one", so the figure is
+#: accurate to the interval this script runs on: hourly runs give hourly
+#: resolution. A tighter number has to come from the Swimlane record's own
+#: status change, or from the first note's timestamp via the notes API.
+#:
+#: Nothing is stamped for an alert that already shows a response the first
+#: time it is seen: the response happened before this script was watching, and
+#: an invented duration is worse than an empty field.
+DETECT_RESPONSE_ON_SYNC = True
+
+#: Values meaning "nobody has acted yet". Anything else counts as a response.
+UNTOUCHED_VERDICTS = {"undefined", "", "none"}
+UNTOUCHED_STATUSES = {"new", "", "none"}
+
 #: How a duration is written: "minutes", "seconds" or "milliseconds".
 #: A Swimlane time-span field stores milliseconds; a numeric or text field is
 #: easier to read in minutes. Match this to the field type you created - a
@@ -1326,6 +1345,59 @@ def verify_written(record, values, alert_id):
                   .format(alert_id, field))
 
 
+def untouched(verdict, status):
+    """True when neither the verdict nor the status shows anyone has acted."""
+    return (str(verdict or "").strip().lower() in UNTOUCHED_VERDICTS
+            and str(status or "").strip().lower() in UNTOUCHED_STATUSES)
+
+
+def stored(record, candidates):
+    """A field's current value on the record, by whichever name it answers to."""
+    for name in (candidates if isinstance(candidates, (tuple, list))
+                 else (candidates,)):
+        try:
+            return record[resolve_field(name)]
+        except Exception:
+            continue
+    return None
+
+
+def response_values(record, flat, field_names):
+    """A response time, if this sync is the one that saw the alert get picked up.
+
+    The transition is the whole point. An alert already acted on when first
+    seen was responded to before this script was watching, so it gets nothing;
+    one that was untouched last sync and is not now was picked up somewhere in
+    between, and the interval between syncs is the resolution available.
+    """
+    respond_field = resolve_field(FIELD_MAP.get("timeToRespond"))
+    if not respond_field or (field_names and respond_field not in field_names):
+        return {}
+    if stored(record, FIELD_MAP["timeToRespond"]) not in (None, ""):
+        return {}                      # already measured; never overwrite it
+
+    was = untouched(stored(record, FIELD_MAP.get("analystVerdict")),
+                    stored(record, FIELD_MAP.get("status")))
+    now_untouched = untouched(flat.get("analystVerdict"), flat.get("status"))
+    if not was or now_untouched:
+        return {}                      # no transition this sync
+
+    seen_at = datetime.now(timezone.utc)
+    elapsed = duration(flat.get("openedTime"), seen_at.isoformat())
+    if elapsed is None:
+        return {}
+    print("  {}: picked up between syncs ({} -> {}); time to respond {} {}"
+          .format(flat.get("id"),
+                  stored(record, FIELD_MAP.get("status")) or "untouched",
+                  flat.get("status"), elapsed, DURATION_UNIT))
+
+    values = {respond_field: elapsed}
+    responded_field = resolve_field(("Responded Time", "responded-time"))
+    if responded_field and (not field_names or responded_field in field_names):
+        values[responded_field] = seen_at
+    return values
+
+
 def upsert(app, flat, field_names):
     """Create the record, or update the one already holding this alert id.
 
@@ -1362,6 +1434,8 @@ def upsert(app, flat, field_names):
         return "created"
 
     record = existing[0]
+    if DETECT_RESPONSE_ON_SYNC:
+        values.update(response_values(record, flat, field_names))
     changed = False
     for field, value in values.items():
         try:
