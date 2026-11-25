@@ -60,10 +60,14 @@ DETAILS_FORMAT = "both"
 #: failing and losing the record.
 DETAILS_MAX_CHARS = 30000
 
-#: Alert key -> Swimlane field name. Only the pairs listed here are written, so
-#: an unmapped key is ignored rather than crashing the run. Fill this in from
-#: what DISCOVERY prints: the left side must match a key in the flattened
-#: alert, the right side must match a field name on the application exactly.
+#: Alert key -> Swimlane field. The right side is either a display name, a
+#: field key, or a tuple of candidates tried in order - the first one the
+#: application actually has wins. Candidates exist because a field is
+#: addressable by display name but is usually referred to by its key, and
+#: getting it wrong writes nothing and raises nothing.
+#:
+#: An unmapped alert key is ignored rather than crashing the run. Discovery
+#: prints both names for every field, which is what to fill this in from.
 FIELD_MAP = {
     "id": "Alert ID",
     "name": "Alert_Name",
@@ -90,8 +94,12 @@ FIELD_MAP = {
     "noteExists": "Note Exists",
     "detectionProduct": "Detection Product",
     "detectionVendor": "Detection Vendor",
-    "assetId": "Asset Id",
-    "assetName": "Asset Name",
+    "assetId": ("Asset Id", "Asset ID", "asset-id"),
+    "assetName": ("Asset Name", "asset-name"),
+    "assetCategory": ("Asset Category", "asset-category"),
+    "assetType": ("Asset Type", "asset-type"),
+    "assetOsType": ("Asset Os Type", "Asset OS Type", "asset-os-type"),
+    "assetStatus": ("Asset Status", "asset-status"),
 }
 
 if DETAILS_FIELD:
@@ -880,6 +888,10 @@ def describe(alerts, app):
     except Exception as error:
         print("  could not read FilterInput ({})".format(error))
 
+    global KEY_NAMES, KNOWN_NAMES
+    KEY_NAMES = key_to_name(app)
+    KNOWN_NAMES = set(app_field_names(app))
+
     print("\n=== fields on '{}' (display name <- key) ===".format(app_name))
     pairs = field_pairs(app)
     if pairs:
@@ -892,7 +904,8 @@ def describe(alerts, app):
     names = app_field_names(app)
 
     if names:
-        missing = [(k, v) for k, v in FIELD_MAP.items() if v not in names]
+        missing = [(k, v) for k, v in FIELD_MAP.items()
+                   if resolve_field(v) not in names]
         unmapped = [k for k, _ in populated if k not in FIELD_MAP]
         print("\n=== mapping check ===")
         if missing:
@@ -970,15 +983,38 @@ UNKNOWN_FIELDS = set()
 #: entry naming a key is translated through this before the write.
 KEY_NAMES = {}
 
+#: Every display name on the application, so a candidate can be checked before
+#: it is sent rather than after it has been silently dropped.
+KNOWN_NAMES = set()
+
+
+def _one_field(field):
+    """A single candidate as a display name, or None if the app lacks it."""
+    if field in KNOWN_NAMES:
+        return field
+    for probe in (field, str(field).lower()):
+        if probe in KEY_NAMES:
+            return KEY_NAMES[probe]
+    # A key the application did not report, or an app whose field list could
+    # not be read: send it as given and let the write decide.
+    return None if KNOWN_NAMES else field
+
 
 def resolve_field(field):
-    """The display name for a FIELD_MAP target, whether it named one or a key."""
-    if field in KEY_NAMES:
-        return KEY_NAMES[field]
-    lowered = str(field).lower()
-    if lowered in KEY_NAMES:
-        return KEY_NAMES[lowered]
-    return field
+    """The display name to write under, from a name, a key, or candidates.
+
+    With several candidates the first the application actually has is used, so
+    a mapping does not have to know whether this tenant spells it "Asset OS
+    Type", "Asset Os Type" or ssa.asset-os-type.
+    """
+    candidates = field if isinstance(field, (tuple, list)) else (field,)
+    for candidate in candidates:
+        resolved = _one_field(candidate)
+        if resolved:
+            return resolved
+    # Nothing matched. Return the first candidate so the failure is reported
+    # under the name the mapping asked for.
+    return candidates[0] if candidates else None
 
 
 def payload_for(flat, field_names):
@@ -1110,9 +1146,10 @@ def main():
               "the lists above, set DISCOVERY = False, and run again.")
         return {"mode": "discovery", "alerts_seen": len(alerts)}
 
-    global KEY_NAMES
+    global KEY_NAMES, KNOWN_NAMES
     KEY_NAMES = key_to_name(app)
     field_names = app_field_names(app)
+    KNOWN_NAMES = set(field_names)
     counts = {"created": 0, "updated": 0, "unchanged": 0, "skipped": 0,
               "failed": 0, "excluded": 0}
     failures = []
