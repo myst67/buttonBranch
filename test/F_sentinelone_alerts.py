@@ -81,6 +81,7 @@ FIELD_MAP = {
     "updatedAt": "Updated At",
     "fileName": "File_Name",
     "fileHash": "File Hash",
+    "filePath": "File Path",
     "ticketId": "Ticket ID",
     # Commented out in the original because a null timestamp crashed the run.
     # to_datetime() returns None for those now, so they can come back.
@@ -142,6 +143,19 @@ RAW_CHARS = 20000
 #: How many "a.b.c = value" lines to print from the response. One alert with
 #: every nested object expanded runs to a few hundred.
 RAW_LINES = 400
+
+#: Where a value really lives when the obvious key is null. The first entry
+#: that holds something wins, so the mapped field gets the value wherever the
+#: console happens to put it.
+#:
+#: fileName and fileHash exist at the top level of an alert but come back null
+#: on this tenant - the file is described under process.file instead, which is
+#: what the flattener reads into the process* keys.
+FALLBACKS = {
+    "fileName": ("fileName", "processFileName"),
+    "fileHash": ("fileHash", "processSha256", "processSha1", "processMd5"),
+    "filePath": ("processFilePath",),
+}
 
 #: Keys whose value is an ISO timestamp and must reach Swimlane as a datetime.
 DATE_KEYS = {"detectedAt", "createdAt", "updatedAt", "firstSeenAt", "lastSeenAt"}
@@ -663,6 +677,9 @@ def flatten(node):
         "processFileName": pfile.get("name"),
         "processFilePath": pfile.get("path"),
         "processSha256": pfile.get("sha256"),
+        "processSha1": pfile.get("sha1"),
+        "processMd5": pfile.get("md5"),
+        "processCertSubject": pfile.get("certSubject"),
         # The rule that fired.
         "analyticsCategory": analytics.get("category"),
         "analyticsName": analytics.get("name"),
@@ -700,6 +717,15 @@ def flatten(node):
     flat["attackPaths"] = ", ".join(
         str(p.get("name")) for p in (node.get("attackPaths") or [])
         if isinstance(p, dict))
+
+    # Resolve the fallbacks last, so they can draw on every key above. The
+    # target is always set, even to None: a key that exists only when it has a
+    # value is invisible to the discovery listing and raises on direct access.
+    for target, sources in FALLBACKS.items():
+        if flat.get(target) in (None, "", []):
+            flat[target] = next(
+                (flat.get(s) for s in sources if flat.get(s) not in (None, "", [])),
+                flat.get(target))
 
     if DETAILS_FIELD:
         flat["_details"] = format_details(node)
