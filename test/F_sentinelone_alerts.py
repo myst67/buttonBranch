@@ -852,6 +852,10 @@ def timings(node, flat):
     resolved_at = resolve.get("resolvedAt")
     severity = str(flat.get("severity") or "").strip().lower()
     sla = SLA_MINUTES.get(severity) or {}
+    # The console's own SLA block. Null on every alert seen so far, but if it
+    # ever populates it beats anything computed here, so it is carried through
+    # rather than ignored.
+    slo = node.get("sloDetails") or {}
 
     values = {
         "detectionTime": flat.get("detectedAt"),
@@ -866,10 +870,42 @@ def timings(node, flat):
         "sevTag": SEVERITY_TAGS.get(severity),
     }
 
-    # The console's own figure, where it reports one. Kept beside ours rather
-    # than replacing it, because the two measure from different starts.
-    if resolve.get("resolvedDuration") is not None:
-        values["resolvedDurationReported"] = resolve.get("resolvedDuration")
+    if isinstance(slo, dict) and slo:
+        for key, value in slo.items():
+            values["slo_{}".format(key)] = value
+
+    # The console reports its own figure in SECONDS, measured created ->
+    # resolved. Confirmed against a resolved alert: created 15:01:47.351,
+    # resolved 18:51:02.688, resolvedDuration 13755 - the same 13755.337s.
+    # Converted to our unit so the two are comparable rather than one being
+    # seconds and the other minutes.
+    reported = resolve.get("resolvedDuration")
+    if reported is not None:
+        try:
+            seconds = float(reported)
+        except (TypeError, ValueError):
+            seconds = None
+        if seconds is not None:
+            if DURATION_UNIT == "seconds":
+                values["resolvedDurationReported"] = round(seconds, 3)
+            elif DURATION_UNIT == "milliseconds":
+                values["resolvedDurationReported"] = int(seconds * 1000)
+            else:
+                values["resolvedDurationReported"] = round(seconds / 60.0, 2)
+
+            # Ours and theirs should agree. A gap means one of the timestamps
+            # is not what it appears, which is worth knowing before the number
+            # reaches a report.
+            ours = values.get("timeToResolve")
+            if ours is not None:
+                scale = {"seconds": 1.0, "milliseconds": 1000.0}.get(
+                    DURATION_UNIT, 1 / 60.0)
+                drift = abs(ours - seconds * scale)
+                if drift > max(2 * scale, abs(ours) * 0.01):
+                    print("  {}: time to resolve {} disagrees with the "
+                          "console's {} - check which timestamps each measures"
+                          .format(flat.get("id"), ours,
+                                  values["resolvedDurationReported"]))
 
     # Whether the resolve landed inside its target, once both exist.
     if values["timeToResolve"] is not None and sla.get("resolve"):
