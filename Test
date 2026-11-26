@@ -112,6 +112,7 @@ FIELD_MAP = {
     "slaRespondMinutes": ("SLA Time Respond", "sla-time-respond"),
     "slaResolveMinutes": ("SLA Time Resolve", "sla-time-resolve"),
     "sevTag": ("Sev Tag", "sev-tag"),
+    "rbpMax": ("rbp-max", "RBP Max", "Rbp Max"),
     "tiTag": ("Ti Tag", "TI Tag", "ti-tag"),
     "tiType": ("Ti Type", "TI Type", "ti-type"),
 
@@ -192,6 +193,31 @@ SLA_MINUTES = {
 SEVERITY_TAGS = {
     "critical": "Critical", "high": "High", "medium": "Medium",
     "low": "Low", "info": "Info",
+}
+
+#: severity -> rbp-max, the numeric weight of the severity. This is the field
+#: a dashboard sums or averages, so the scale matters more than the numbers:
+#:
+#:   - 0 to 100, because an average over a mixed queue reads directly as a
+#:     percentage of worst case, and there is room between bands to insert one
+#:     later without renumbering.
+#:   - info is 0, not 1. An informational alert carries no risk, and a nonzero
+#:     floor means a quiet day of nothing but info still shows a score.
+#:   - the gaps widen towards the top rather than being evenly spaced, so one
+#:     critical outweighs two mediums in a sum. Evenly spaced weights make a
+#:     queue of mediums look like an emergency.
+#:
+#: For a 0-10 scale instead, use {critical: 10, high: 7, medium: 4, low: 1,
+#: info: 0}; nothing else needs changing. A severity not listed here leaves
+#: the field empty rather than scoring 0, so an unrecognised severity is
+#: visible as a gap instead of looking like a harmless alert.
+SEVERITY_WEIGHTS = {
+    "critical": 100,
+    "high": 70,
+    "medium": 40,
+    "low": 10,
+    "info": 0,
+    "informational": 0,
 }
 
 #: SentinelOne's verdict -> ti-tag, also a selection field. result is BENIGN
@@ -1005,6 +1031,8 @@ def timings(node, flat):
         "slaRespondMinutes": sla.get("respond"),
         "slaResolveMinutes": sla.get("resolve"),
         "sevTag": SEVERITY_TAGS.get(severity),
+        # The weight of the severity, for the dashboard to sum or average.
+        "rbpMax": SEVERITY_WEIGHTS.get(severity),
         "tiType": TI_TYPE,
     }
 
@@ -1200,11 +1228,29 @@ def describe(alerts, app):
         counts[key] = counts.get(key, 0) + 1
     print("\n=== severity distribution ===")
     keeping = 0
+    scored = []
     for value, count in sorted(counts.items(), key=lambda i: -i[1]):
         dropped = excluded_reason({"severity": value}) is not None
         keeping += 0 if dropped else count
-        print("  {:<14} {:>4}{}".format(value, count,
-                                        "   <- excluded" if dropped else "   kept"))
+        weight = SEVERITY_WEIGHTS.get(str(value).strip().lower())
+        if not dropped and weight is not None:
+            scored.append((weight, count))
+        print("  {:<14} {:>4}   rbp-max {:<6}{}".format(
+            value, count,
+            "-" if weight is None else weight,
+            "   <- excluded" if dropped else "   kept"))
+    if scored:
+        # What the dashboard will actually read, so the scale can be judged
+        # against a real queue rather than in the abstract.
+        total = sum(w * c for w, c in scored)
+        alerts_scored = sum(c for _, c in scored)
+        print("  rbp-max over the kept alerts: total {}, mean {:.1f}, peak {}"
+              .format(total, total / alerts_scored, max(w for w, _ in scored)))
+    unweighted = [v for v in counts
+                  if SEVERITY_WEIGHTS.get(str(v).strip().lower()) is None]
+    if unweighted:
+        print("  no SEVERITY_WEIGHTS entry, so rbp-max stays empty: {}"
+              .format(", ".join(sorted(unweighted))))
     rule = ("ONLY_SEVERITIES = {}".format(sorted(ONLY_SEVERITIES)) if ONLY_SEVERITIES
             else "EXCLUDE_SEVERITIES = {}".format(sorted(EXCLUDE_SEVERITIES) or "nothing"))
     print("  {} keeps {} of {} alert(s)".format(rule, keeping, len(flats)))
