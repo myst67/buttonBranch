@@ -1284,10 +1284,11 @@ def describe(alerts, app):
     except Exception as error:
         print("  could not read FilterInput ({})".format(error))
 
-    global KEY_NAMES, KNOWN_NAMES, SELECTION_OPTIONS
+    global KEY_NAMES, KNOWN_NAMES, SELECTION_OPTIONS, BARE_KEYS
     KEY_NAMES = key_to_name(app)
     KNOWN_NAMES = set(app_field_names(app))
     SELECTION_OPTIONS = selection_options(app)
+    BARE_KEYS = bare_keys(app)
 
     print("\n=== fields on '{}' (display name <- key) ===".format(app_name))
     pairs = field_pairs(app)
@@ -1429,6 +1430,34 @@ def key_to_name(app):
     return mapping
 
 
+#: Field key -> display name, keyed on the part after the applet prefix. A key
+#: is shown in the builder as na.offense-assigned-to or ssa.alert-id, and which
+#: prefix a field carries depends on the applet it came from - so a mapping
+#: written from one tenant's builder can name the right field under the wrong
+#: prefix and match nothing. Consulted only after the exact spellings fail.
+BARE_KEYS = {}
+
+
+def bare_keys(app):
+    """The same mapping as key_to_name, with the applet prefix dropped.
+
+    Ambiguous suffixes are discarded rather than guessed at: if two applets
+    both carry an offense-assigned-to, there is no way to tell from the
+    mapping which was meant, and picking one silently is how a value ends up
+    in the wrong field.
+    """
+    seen = {}
+    for name, key in field_pairs(app):
+        if not (key and name) or "." not in str(key):
+            continue
+        bare = str(key).rsplit(".", 1)[-1].strip().lower()
+        if not bare:
+            continue
+        seen.setdefault(bare, set()).add(name)
+    return {bare: next(iter(names)) for bare, names in seen.items()
+            if len(names) == 1}
+
+
 # ======================================================================
 # Writing
 # ======================================================================
@@ -1468,9 +1497,23 @@ def _one_field(field):
     for probe in (field, str(field).lower()):
         if probe in KEY_NAMES:
             return KEY_NAMES[probe]
+    # Last resort: the same key under a different applet prefix. Only taken
+    # when the suffix names exactly one field, so this cannot pick the wrong
+    # one of two look-alikes.
+    bare = str(field).rsplit(".", 1)[-1].strip().lower()
+    if bare in BARE_KEYS:
+        matched = BARE_KEYS[bare]
+        if str(field) != matched:
+            PREFIX_MATCHED[str(field)] = matched
+        return matched
     # A key the application did not report, or an app whose field list could
     # not be read: send it as given and let the write decide.
     return None if KNOWN_NAMES else field
+
+
+#: Candidates matched only by dropping the applet prefix, reported at the end
+#: of a run so the mapping can be corrected to the spelling the app uses.
+PREFIX_MATCHED = {}
 
 
 def resolve_field(field):
@@ -1515,15 +1558,25 @@ def for_selection(key, value, field=None):
     return value
 
 
+#: alert key -> the candidates tried, for every FIELD_MAP entry whose field
+#: could not be matched to a field on the application. These never reach the
+#: write at all, which is the quietest of all the failures: no value, no
+#: error, and nothing in the record to suggest anything was attempted. They
+#: used to be left to discovery, which is off on a normal run.
+UNRESOLVED_FIELDS = {}
+
+
 def payload_for(flat, field_names):
     """The FIELD_MAP pairs this alert can actually fill."""
     values = {}
     for key, field in FIELD_MAP.items():
+        mapping = field
         field = resolve_field(field)
         if field in UNKNOWN_FIELDS:
             continue
         if field_names and field not in field_names:
-            continue                       # reported by discovery, skipped here
+            UNRESOLVED_FIELDS[key] = mapping
+            continue
         raw = flat.get(key)
         value = to_datetime(raw) if key in DATE_KEYS else as_text(raw)
         value = for_selection(key, value, field)
@@ -1693,45 +1746,70 @@ def response_values(record, flat, field_names):
     return values
 
 
-#: Set False once the dropdowns are confirmed working, to keep the task log
+#: Set False once the fields are confirmed working, to keep the task log
 #: short. One alert is traced, not every alert, so the cost is a few lines.
 TRACE_SELECTIONS = True
+
+#: Extra alert keys to trace alongside the dropdowns. Add the key of any field
+#: that is coming out empty: the trace separates the causes, which the empty
+#: field cannot. "" is accepted as a key so a whole-record trace is possible
+#: by listing FIELD_MAP's keys here.
+TRACE_FIELDS = {"assigneeEmail", "assigneeName", "_details"}
 
 _TRACED = []
 
 
 def trace_selections(flat, values):
-    """Print the whole chain for each dropdown, once per run.
+    """Print the whole chain for each traced field, once per run.
 
-    A dropdown that stays empty has four possible causes - the field name did
-    not resolve, the alert carried no value, SELECTION_VALUES had no entry, or
-    the mapped value is not an option - and they are indistinguishable from
-    the empty field. Printing every step for one alert separates them.
+    A field that stays empty has several possible causes - the name did not
+    resolve to anything on the application, the alert carried no value, a
+    dropdown had no entry for it, or the mapped value is not one of the
+    dropdown's options - and every one of them looks identical from the
+    record. Printing each step for a single alert separates them.
     """
     if not TRACE_SELECTIONS or _TRACED:
         return
     _TRACED.append(True)
-    print("\n=== dropdowns, for alert {} ===".format(flat.get("id")))
-    for key in sorted(SELECTION_VALUES):
+    print("\n=== fields, for alert {} ===".format(flat.get("id")))
+    for key in sorted(set(SELECTION_VALUES) | set(TRACE_FIELDS)):
+        if key not in FIELD_MAP:
+            print("  {}   <- not a FIELD_MAP key, so nothing is written for it"
+                  .format(key))
+            continue
         mapping = FIELD_MAP.get(key)
         field = resolve_field(mapping)
         raw = flat.get(key)
         mapped = for_selection(key, as_text(raw), field)
         options = SELECTION_OPTIONS.get(field)
+        resolved_ok = field in KNOWN_NAMES
         print("  {}".format(key))
         print("      FIELD_MAP     {!r}".format(mapping))
         print("      resolves to   {!r}{}".format(
-            field, "" if field in KNOWN_NAMES else "   <- NOT a field on this app"))
-        print("      options       {}".format(
-            ", ".join(options) if options
-            else "none reported - not a selection field, or the SDK will not say"))
-        print("      alert sends   {!r}".format(raw))
-        print("      mapped to     {!r}{}".format(
-            mapped,
-            "" if not options or mapped is None or str(mapped) in options
-            else "   <- NOT an option, so it will store nothing"))
-        print("      in the write  {}".format(
-            "yes" if field in values else "no - dropped before the write"))
+            field, "" if resolved_ok else
+            "   <- NO field on this app answers to any of those"))
+        if options:
+            print("      options       {}".format(", ".join(options)))
+            print("      alert sends   {!r}".format(raw))
+            print("      mapped to     {!r}{}".format(
+                mapped, "" if mapped is None or str(mapped) in options
+                else "   <- NOT an option, so it will store nothing"))
+        else:
+            print("      field type    {}".format(
+                "not a dropdown (text, number or date)" if resolved_ok
+                else "unknown - the name did not resolve"))
+            print("      alert sends   {!r}{}".format(
+                raw, "   <- the alert carried no value, so nothing to write"
+                if raw in (None, "", []) else ""))
+        if not resolved_ok:
+            reason = "no - the name does not match any field"
+        elif field in values:
+            reason = "yes"
+        elif raw in (None, "", []):
+            reason = "no - the alert sent nothing"
+        else:
+            reason = "no - dropped on the way to the write"
+        print("      in the write  {}".format(reason))
 
 
 def upsert(app, flat, field_names):
@@ -1824,11 +1902,12 @@ def main():
               "the lists above, set DISCOVERY = False, and run again.")
         return {"mode": "discovery", "alerts_seen": len(alerts)}
 
-    global KEY_NAMES, KNOWN_NAMES, SELECTION_OPTIONS
+    global KEY_NAMES, KNOWN_NAMES, SELECTION_OPTIONS, BARE_KEYS
     KEY_NAMES = key_to_name(app)
     field_names = app_field_names(app)
     KNOWN_NAMES = set(field_names)
     SELECTION_OPTIONS = selection_options(app)
+    BARE_KEYS = bare_keys(app)
     counts = {"created": 0, "updated": 0, "unchanged": 0, "skipped": 0,
               "failed": 0, "excluded": 0}
     failures = []
@@ -1860,6 +1939,21 @@ def main():
         # FIELD_MAP, or add them to the application.
         print("the application does not have: {}"
               .format(", ".join(sorted(UNKNOWN_FIELDS))))
+    if PREFIX_MATCHED:
+        print("matched only after dropping the applet prefix - worth "
+              "correcting in FIELD_MAP:")
+        for wanted, matched in sorted(PREFIX_MATCHED.items()):
+            print("  {!r} -> {!r}".format(wanted, matched))
+    if UNRESOLVED_FIELDS:
+        # Never written, and nothing about the record would show it. The
+        # candidates are printed because the fix is a name: run with
+        # DISCOVERY = True and copy the spelling the application reports.
+        print("no field on '{}' matches these FIELD_MAP entries, so they were "
+              "never written:".format(app_name))
+        for key, mapping in sorted(UNRESOLVED_FIELDS.items()):
+            tried = mapping if isinstance(mapping, (tuple, list)) else (mapping,)
+            print("  {:<18} tried {}".format(
+                key, ", ".join(repr(t) for t in tried)))
     if SILENT_FIELDS:
         print("accepted but stored nothing (use the display name, not the key): "
               "{}".format(", ".join(sorted(SILENT_FIELDS))))
@@ -1884,6 +1978,7 @@ def main():
               "unknown_fields": sorted(UNKNOWN_FIELDS),
               "silent_fields": sorted(SILENT_FIELDS),
               "bad_options": {f: sorted(v) for f, v in BAD_OPTIONS.items()},
+              "unresolved_fields": sorted(UNRESOLVED_FIELDS),
               "excluded_by": excluded_by}
     result.update(counts)
     return result
