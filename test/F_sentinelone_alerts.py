@@ -121,6 +121,13 @@ FIELD_MAP = {
     "slaResolveMinutes": ("SLA Time Resolve", "sla-time-resolve"),
     "sevTag": ("Sev Tag", "sev-tag"),
     "rbpMax": ("rbp-max", "RBP Max", "Rbp Max"),
+    # The console's severity again, for a dropdown rather than a text field.
+    # Three fields carry the same fact in different shapes: severity as the
+    # console sends it, sevTag and severityDropdown as options. They are kept
+    # separate because a text field and a dropdown want different spellings,
+    # and a tenant may have any one of the three.
+    "severityDropdown": ("severity-dropdown", "Severity Dropdown",
+                         "Severity DropDown"),
     "tiTag": ("Ti Tag", "TI Tag", "ti-tag"),
     "tiType": ("Ti Type", "TI Type", "ti-type"),
 
@@ -291,6 +298,11 @@ SELECTION_VALUES = {
         "mitigated": "Mitigated",
         "undefined": None,
     },
+    # Deliberately empty. CRITICAL, HIGH, MEDIUM, LOW and INFO differ from
+    # Critical, High, Medium, Low and Info only in spelling, so they are
+    # matched against the dropdown's own options and need no entries. Add one
+    # only for a decision - INFO meaning Low, say, on a dropdown with no Info.
+    "severityDropdown": {},
 }
 
 #: Source values seen that SELECTION_VALUES does not name, reported once at
@@ -1051,6 +1063,10 @@ def timings(node, flat):
         "slaRespondMinutes": sla.get("respond"),
         "slaResolveMinutes": sla.get("resolve"),
         "sevTag": SEVERITY_TAGS.get(severity),
+        # Passed through as the console sends it. for_selection matches it
+        # against the dropdown's own options, so no table is needed unless
+        # this tenant words an option differently from the console.
+        "severityDropdown": flat.get("severity"),
         # The weight of the severity, for the dashboard to sum or average.
         "rbpMax": SEVERITY_WEIGHTS.get(severity),
         "tiType": TI_TYPE,
@@ -1484,9 +1500,15 @@ KNOWN_NAMES = set()
 #: and then no check is made.
 SELECTION_OPTIONS = {}
 
-#: Field -> values SELECTION_VALUES produced that the dropdown does not carry.
-#: These would be dropped silently, so they are named at the end of the run
-#: together with the options that do exist.
+#: Field -> "console value -> option" for every value matched by spelling
+#: rather than by a table entry. Nothing needs fixing when this appears; it is
+#: printed so the translation a run performed is on the record.
+OPTION_MATCHED = {}
+
+#: Field -> values that no option matches, by table or by spelling. The field
+#: is left alone rather than being sent a value the dropdown would refuse, and
+#: these are named at the end of the run beside the options that do exist -
+#: the fix is either an entry in SELECTION_VALUES or a new option on the field.
 BAD_OPTIONS = {}
 
 
@@ -1533,6 +1555,41 @@ def resolve_field(field):
     return candidates[0] if candidates else None
 
 
+def normalised(text):
+    """A value reduced to what two spellings of the same option share.
+
+    SentinelOne writes IN_PROGRESS, a Swimlane dropdown displays In Progress,
+    and they are the same option. Case, underscores, hyphens and runs of
+    whitespace are the only differences in practice, so they are removed from
+    both sides before comparing.
+    """
+    plain = str(text).strip().lower()
+    for character in ("_", "-", "/"):
+        plain = plain.replace(character, " ")
+    return " ".join(plain.split())
+
+
+def match_option(value, field):
+    """The option this value means, matched against the ones the app reports.
+
+    SELECTION_VALUES stays for the mappings that are decisions - RESOLVED
+    meaning Closed, UNDEFINED meaning blank - rather than spellings. Anything
+    that differs only in spelling is matched here, against the live option
+    list, so a new dropdown needs no table at all and a table written from the
+    wrong tenant cannot silently send a value that does not exist.
+    """
+    options = SELECTION_OPTIONS.get(field)
+    if not options or value is None:
+        return None
+    wanted = normalised(value)
+    if not wanted:
+        return None
+    for option in options:
+        if normalised(option) == wanted:
+            return option
+    return None
+
+
 def for_selection(key, value, field=None):
     """A selection field's option for this value, or the value unchanged.
 
@@ -1541,20 +1598,32 @@ def for_selection(key, value, field=None):
     evidence, while the record gets the option its dropdown will accept.
     """
     table = SELECTION_VALUES.get(key)
-    if not table or value is None:
+    if value is None or not (table or SELECTION_OPTIONS.get(field)):
         return value
     lowered = str(value).strip().lower()
-    if lowered in table:
+    if table and lowered in table:
+        # An explicit decision, and it wins. A table entry mapping to None is
+        # a deliberate blank, so there is nothing left to match.
         value = table[lowered]
+        if value is None:
+            return None
     else:
-        # Not a value we know. Pass it through - it either matches an option or
-        # is reported as stored-nothing - and note it so the table can grow.
-        UNMAPPED_SELECTIONS.setdefault(key, set()).add(str(value))
-    # The dropdown has the last word. Checking before the write turns a field
-    # that would quietly stay empty into a line naming both sides.
+        matched = match_option(value, field)
+        if matched is not None:
+            if str(matched) != str(value):
+                OPTION_MATCHED.setdefault(field, set()).add(
+                    "{} -> {}".format(value, matched))
+            value = matched
+        elif table is not None:
+            # A table exists and has no entry, and no option reads the same.
+            UNMAPPED_SELECTIONS.setdefault(key, set()).add(str(value))
+    # The dropdown has the last word. Where its options are known and none of
+    # them is this value, sending it anyway stores nothing at best and costs a
+    # rejected create and a retry at worst - so it is held back and reported.
     options = SELECTION_OPTIONS.get(field) if field else None
     if options and value is not None and str(value) not in options:
         BAD_OPTIONS.setdefault(field, set()).add(str(value))
+        return None
     return value
 
 
@@ -1939,6 +2008,10 @@ def main():
         # FIELD_MAP, or add them to the application.
         print("the application does not have: {}"
               .format(", ".join(sorted(UNKNOWN_FIELDS))))
+    if OPTION_MATCHED:
+        print("matched to a dropdown option by spelling:")
+        for field, pairs in sorted(OPTION_MATCHED.items()):
+            print("  {}: {}".format(field, "; ".join(sorted(pairs))))
     if PREFIX_MATCHED:
         print("matched only after dropping the applet prefix - worth "
               "correcting in FIELD_MAP:")
@@ -1964,11 +2037,11 @@ def main():
         for key, seen in sorted(UNMAPPED_SELECTIONS.items()):
             print("  {:<18} {}".format(key, ", ".join(sorted(seen))))
     if BAD_OPTIONS:
-        # These were sent and dropped. Both lists are printed because the fix
-        # is either a spelling change on the left or a new option on the right.
-        print("sent values the dropdown does not carry (stored nothing):")
+        # Both lists are printed because the fix is either a SELECTION_VALUES
+        # entry on the left or a new option on the field on the right.
+        print("no option matches these, so the field was left alone:")
         for field, seen in sorted(BAD_OPTIONS.items()):
-            print("  {}: sent {}".format(field, ", ".join(sorted(seen))))
+            print("  {}: had {}".format(field, ", ".join(sorted(seen))))
             print("  {}  accepts {}".format(
                 " " * len(field), ", ".join(SELECTION_OPTIONS.get(field, []))))
     for line in failures[:20]:
