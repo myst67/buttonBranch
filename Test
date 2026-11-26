@@ -72,10 +72,10 @@ FIELD_MAP = {
     "id": "Alert ID",
     "name": "Alert_Name",
     "description": "Alert_Description",
-    "status": ("Alert Status", "alert-status"),
-    "severity": ("Alert Severity", "alert-severity"),
-    "classification": ("Alert Classification", "alert-classification"),
-    "confidenceLevel": ("Confidence Level", "confidence-level"),
+    "status": ("alert-status", "Alert Status"),
+    "severity": ("alert-severity", "Alert Severity"),
+    "classification": ("alert-classification", "Alert Classification"),
+    "confidenceLevel": ("confidence-level", "Confidence Level"),
     "externalId": "External ID",
     "storylineId": "StoryLine ID",
     "attackSurfaces": "Attack Surfaces",
@@ -218,14 +218,20 @@ TI_TYPE = "SentinelOne SIEM"
 #: either matches an option or shows up in the "stored nothing" report rather
 #: than disappearing. Add a dropdown by adding its key: nothing else changes.
 SELECTION_VALUES = {
+    # This tenant's dropdown is exactly: New, In Progress, On Hold, Closed.
+    # SentinelOne has no On Hold - that is an analyst state, set in Swimlane
+    # and never sent by the console - so nothing maps onto it and a record
+    # sitting On Hold is left alone by ON_HOLD_IS_STICKY below.
+    # RESOLVED and MITIGATED both mean the console is finished with the alert,
+    # which is what Closed means here.
     "status": {
         "new": "New",
+        "unresolved": "New",
         "in_progress": "In Progress",
         "inprogress": "In Progress",
-        "resolved": "Resolved",
+        "resolved": "Closed",
         "closed": "Closed",
-        "unresolved": "Unresolved",
-        "mitigated": "Mitigated",
+        "mitigated": "Closed",
     },
     "analystVerdict": {
         "undefined": None,
@@ -256,6 +262,14 @@ SELECTION_VALUES = {
 #: Source values seen that SELECTION_VALUES does not name, reported once at
 #: the end so the dropdown can be extended rather than quietly missing them.
 UNMAPPED_SELECTIONS = {}
+
+#: Dropdown options that belong to the analyst, not to SentinelOne. A record
+#: already showing one of these keeps it: the console knows nothing about On
+#: Hold and would otherwise push the record back to New on the next sync,
+#: undoing the triage every ten minutes. Keyed by alert key -> options.
+ANALYST_OWNED = {
+    "status": {"on hold"},
+}
 
 #: Stamp a response time when a sync first sees an alert that has been acted
 #: on, having previously seen it untouched.
@@ -1461,7 +1475,16 @@ def blame_fields(error, values):
     """
     text = str(error)
     named = {field for field in values if field and field in text}
-    UNKNOWN_FIELDS.update(named)
+    # A selection field named in the error is ambiguous: the field may be
+    # missing, or present and refusing the value. Blaming it drops it for the
+    # rest of the run, so a dropdown gets the benefit of the doubt and is
+    # reported instead.
+    refused = {field for field in named if field in SELECTION_OPTIONS}
+    for field in sorted(refused):
+        print("  {!r} refused {!r}; it accepts only: {}".format(
+            field, values.get(field), ", ".join(SELECTION_OPTIONS[field])))
+        BAD_OPTIONS.setdefault(field, set()).add(str(values.get(field)))
+    UNKNOWN_FIELDS.update(named - refused)
     return named
 
 
@@ -1490,9 +1513,22 @@ def verify_written(record, values, alert_id):
             continue
         if sent not in (None, "") and stored in (None, ""):
             SILENT_FIELDS.add(field)
-            print("  {}: {!r} was accepted but stored nothing - it is probably "
-                  "a field key where the display name is wanted"
-                  .format(alert_id, field))
+            options = SELECTION_OPTIONS.get(field)
+            if options:
+                # A dropdown, so the name resolved and the value is the suspect.
+                print("  {}: {!r} stored nothing - sent {!r}, and the dropdown "
+                      "accepts only: {}".format(
+                          alert_id, field, sent, ", ".join(options)))
+            else:
+                print("  {}: {!r} was accepted but stored nothing - it is "
+                      "probably a field key where the display name is wanted"
+                      .format(alert_id, field))
+        elif (field in SELECTION_OPTIONS and sent not in (None, "")
+              and str(stored) != str(sent)):
+            # Accepted, non-empty, and not what was sent. Worth saying: a
+            # dropdown that rewrites the value is not storing what we think.
+            print("  {}: {!r} holds {!r}, not the {!r} that was sent"
+                  .format(alert_id, field, stored, sent))
 
 
 def untouched(verdict, status):
@@ -1510,6 +1546,24 @@ def stored(record, candidates):
         except Exception:
             continue
     return None
+
+
+def keep_analyst_values(record, values):
+    """Drop writes that would overwrite a state only an analyst sets.
+
+    On Hold is the case this exists for: it is an option on the Swimlane
+    dropdown and not a SentinelOne status, so every sync would push the record
+    from On Hold back to New and the triage would not survive ten minutes.
+    """
+    kept = dict(values)
+    for key, owned in ANALYST_OWNED.items():
+        field = resolve_field(FIELD_MAP.get(key))
+        if field not in kept:
+            continue
+        current = str(stored(record, FIELD_MAP.get(key)) or "").strip().lower()
+        if current in owned:
+            kept.pop(field)
+    return kept
 
 
 def response_values(record, flat, field_names):
@@ -1548,6 +1602,47 @@ def response_values(record, flat, field_names):
     return values
 
 
+#: Set False once the dropdowns are confirmed working, to keep the task log
+#: short. One alert is traced, not every alert, so the cost is a few lines.
+TRACE_SELECTIONS = True
+
+_TRACED = []
+
+
+def trace_selections(flat, values):
+    """Print the whole chain for each dropdown, once per run.
+
+    A dropdown that stays empty has four possible causes - the field name did
+    not resolve, the alert carried no value, SELECTION_VALUES had no entry, or
+    the mapped value is not an option - and they are indistinguishable from
+    the empty field. Printing every step for one alert separates them.
+    """
+    if not TRACE_SELECTIONS or _TRACED:
+        return
+    _TRACED.append(True)
+    print("\n=== dropdowns, for alert {} ===".format(flat.get("id")))
+    for key in sorted(SELECTION_VALUES):
+        mapping = FIELD_MAP.get(key)
+        field = resolve_field(mapping)
+        raw = flat.get(key)
+        mapped = for_selection(key, as_text(raw), field)
+        options = SELECTION_OPTIONS.get(field)
+        print("  {}".format(key))
+        print("      FIELD_MAP     {!r}".format(mapping))
+        print("      resolves to   {!r}{}".format(
+            field, "" if field in KNOWN_NAMES else "   <- NOT a field on this app"))
+        print("      options       {}".format(
+            ", ".join(options) if options
+            else "none reported - not a selection field, or the SDK will not say"))
+        print("      alert sends   {!r}".format(raw))
+        print("      mapped to     {!r}{}".format(
+            mapped,
+            "" if not options or mapped is None or str(mapped) in options
+            else "   <- NOT an option, so it will store nothing"))
+        print("      in the write  {}".format(
+            "yes" if field in values else "no - dropped before the write"))
+
+
 def upsert(app, flat, field_names):
     """Create the record, or update the one already holding this alert id.
 
@@ -1559,6 +1654,7 @@ def upsert(app, flat, field_names):
         return "skipped"
 
     values = payload_for(flat, field_names)
+    trace_selections(flat, values)
     if not values:
         return "skipped"
 
@@ -1586,6 +1682,7 @@ def upsert(app, flat, field_names):
     record = existing[0]
     if DETECT_RESPONSE_ON_SYNC:
         values.update(response_values(record, flat, field_names))
+    values = keep_analyst_values(record, values)
     changed = False
     for field, value in values.items():
         try:
@@ -1594,10 +1691,15 @@ def upsert(app, flat, field_names):
                 changed = True
         except Exception as error:        # one bad field must not lose the rest
             print("  {}: could not set {!r}: {}".format(alert_id, field, error))
-    if changed:
-        record.save()
-        return "updated"
-    return "unchanged"
+    if not changed:
+        return "unchanged"
+    record.save()
+    # The update path used to stop here. Assignment to a selection field can
+    # be accepted and then store nothing, exactly as create does, so the only
+    # record whose fields were ever checked was a brand new one - and after
+    # the first sync there are no new ones. Verify here too.
+    verify_written(record, values, alert_id)
+    return "updated"
 
 
 # ======================================================================
