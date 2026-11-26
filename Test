@@ -1670,8 +1670,18 @@ def upsert(app, flat, field_names):
             # The application named a field it does not have. Drop it and try
             # once more: every later alert skips it too, so the cost is one
             # retry for the whole run rather than one failure per alert.
-            print("  dropping field(s) the application rejected: {}"
-                  .format(", ".join(sorted(named))))
+            # "rejected" covers two different things. A field the app does
+            # not have stays dropped for the run; a dropdown that refused one
+            # value is dropped from this write only, and the next alert may
+            # carry a value it does accept.
+            missing = sorted(named & UNKNOWN_FIELDS)
+            refused = sorted(named - UNKNOWN_FIELDS)
+            if missing:
+                print("  the application does not have, dropping for the run: "
+                      "{}".format(", ".join(missing)))
+            if refused:
+                print("  {}: writing without {} - the value it refused is "
+                      "named above".format(alert_id, ", ".join(refused)))
             retry = {k: v for k, v in values.items() if k not in named}
             if not retry:
                 raise
