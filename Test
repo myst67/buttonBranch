@@ -313,6 +313,20 @@ SELECTION_VALUES = {
 #: the end so the dropdown can be extended rather than quietly missing them.
 UNMAPPED_SELECTIONS = {}
 
+#: When a field's options cannot be read from the application, a dropdown
+#: value has to be guessed at. SCREAMING_SNAKE is how SentinelOne writes
+#: these and is almost never how a Swimlane dropdown displays them, so the
+#: console's value is retitled - CRITICAL becomes Critical, IN_PROGRESS
+#: becomes In Progress - rather than being sent as it arrived. It is a guess,
+#: so it is reported, and it is only ever used where nothing better exists:
+#: a field whose options were read is matched against them instead.
+#:
+#: Set False to send the console's wording unchanged.
+TITLE_CASE_UNKNOWN_OPTIONS = True
+
+#: field -> "console value -> guess", for each value retitled this way.
+RETITLED = {}
+
 #: alert key -> the option to use when nothing else matches, including when
 #: the alert carries no value at all. This is for a dropdown that has an
 #: option for exactly that case: a severity dropdown offering Unknown means an
@@ -1327,6 +1341,7 @@ def describe(alerts, app):
     KNOWN_NAMES = set(app_field_names(app))
     SELECTION_OPTIONS = selection_options(app)
     BARE_KEYS = bare_keys(app)
+    dump_field_defs(app)
 
     print("\n=== fields on '{}' (display name <- key) ===".format(app_name))
     pairs = field_pairs(app)
@@ -1432,23 +1447,34 @@ def selection_options(app):
         else:
             continue
         for name, definition in definitions:
+            # Which of these a build uses is not knowable in advance, and
+            # looking under one name only means the options read as absent and
+            # every dropdown falls back to the console's own wording.
+            holders = ("values", "options", "selectionValues", "valuesList",
+                       "items", "choices", "selection_values")
             if isinstance(definition, dict):
                 name = name or definition.get("name")
-                raw = definition.get("values") or definition.get("options")
+                raw = next((definition[h] for h in holders
+                            if isinstance(definition.get(h), (list, tuple))
+                            and definition[h]), None)
             else:
                 name = name or getattr(definition, "name", None)
-                raw = (getattr(definition, "values", None)
-                       or getattr(definition, "options", None))
+                raw = next((getattr(definition, h) for h in holders
+                            if isinstance(getattr(definition, h, None),
+                                          (list, tuple))
+                            and getattr(definition, h)), None)
             if not name or not isinstance(raw, (list, tuple)) or not raw:
                 continue
             options = []
             for option in raw:
                 if isinstance(option, dict):
-                    text = option.get("name") or option.get("value")
+                    text = (option.get("name") or option.get("value")
+                            or option.get("text") or option.get("label"))
                 elif isinstance(option, str):
                     text = option
                 else:
-                    text = getattr(option, "name", None)
+                    text = (getattr(option, "name", None)
+                            or getattr(option, "value", None))
                 if text:
                     options.append(str(text))
             if options:
@@ -1612,6 +1638,25 @@ def match_option(value, field):
     return None
 
 
+def retitled(value, field):
+    """The console's value as a dropdown is likely to spell it.
+
+    Only reached when the field's options are unknown, so this is a guess and
+    not a match. It is still a better guess than the console's own wording: no
+    Swimlane dropdown this script has met displays CRITICAL or IN_PROGRESS.
+    """
+    if not TITLE_CASE_UNKNOWN_OPTIONS or value is None:
+        return value
+    words = normalised(value).split()
+    if not words:
+        return value
+    guess = " ".join(word.capitalize() for word in words)
+    if guess != str(value):
+        RETITLED.setdefault(field or "?", set()).add(
+            "{} -> {}".format(value, guess))
+    return guess
+
+
 def fallback_for(key, field, original):
     """The option to fall back to for this key, or None if there is not one."""
     wanted = SELECTION_FALLBACK.get(key)
@@ -1666,6 +1711,10 @@ def for_selection(key, value, field=None):
     if options and value is not None and str(value) not in options:
         BAD_OPTIONS.setdefault(field, set()).add(str(value))
         return fallback_for(key, field, value)
+    if not options:
+        # The options could not be read, so nothing above matched anything.
+        # Send the likeliest spelling rather than the console's.
+        return retitled(value, field)
     return value
 
 
@@ -1861,6 +1910,15 @@ def response_values(record, flat, field_names):
 #: short. One alert is traced, not every alert, so the cost is a few lines.
 TRACE_SELECTIONS = True
 
+#: Field names or keys whose raw definition is printed, exactly as the SDK
+#: reports it. This is the one thing that settles a dropdown that will not
+#: populate: it shows whether the field is a selection field at all, and under
+#: which key its options are listed - which differs between builds, and an
+#: option list looked for under the wrong name reads as no options and sends
+#: the console's wording instead. Matched loosely, so "severity" catches
+#: Severity Dropdown and severity-dropdown alike. Empty to print nothing.
+DUMP_FIELD_DEFS = {"severity-dropdown", "alert-status"}
+
 #: Extra alert keys to trace alongside the dropdowns. Add the key of any field
 #: that is coming out empty: the trace separates the causes, which the empty
 #: field cannot. "" is accepted as a key so a whole-record trace is possible
@@ -1868,6 +1926,53 @@ TRACE_SELECTIONS = True
 TRACE_FIELDS = {"assigneeEmail", "assigneeName", "_details"}
 
 _TRACED = []
+
+
+def dump_field_defs(app):
+    """Print the SDK's own definition for the fields named in DUMP_FIELD_DEFS."""
+    if not DUMP_FIELD_DEFS:
+        return
+    wanted = [normalised(w) for w in DUMP_FIELD_DEFS if str(w).strip()]
+    for attribute in ("field_definitions", "fields"):
+        value = getattr(app, attribute, None)
+        if isinstance(value, dict):
+            definitions = list(value.values())
+        elif isinstance(value, (list, tuple)):
+            definitions = list(value)
+        else:
+            continue
+        shown = 0
+        for definition in definitions:
+            if isinstance(definition, dict):
+                label = "{} {}".format(definition.get("name") or "",
+                                       definition.get("key") or "")
+                body = definition
+            else:
+                label = "{} {}".format(getattr(definition, "name", "") or "",
+                                       getattr(definition, "key", "") or "")
+                body = {a: getattr(definition, a) for a in dir(definition)
+                        if not a.startswith("_")
+                        and not callable(getattr(definition, a, None))}
+            haystack = normalised(label)
+            if not any(w and w in haystack for w in wanted):
+                continue
+            if not shown:
+                print("\n=== raw field definitions, from app.{} ==="
+                      .format(attribute))
+            shown += 1
+            print("  {}".format(label.strip()))
+            for shown_line, line in enumerate(paths(body)):
+                if shown_line >= 60:
+                    print("      ... truncated")
+                    break
+                print("      " + line)
+        if shown:
+            print("  the option list is whichever key above holds the "
+                  "dropdown's wording; selection_options looks under values, "
+                  "options, selectionValues, valuesList, items and choices")
+            return
+    print("\n=== raw field definitions ===")
+    print("  this SDK version exposes no field list to read them from")
 
 
 def trace_selections(flat, values):
@@ -2019,6 +2124,10 @@ def main():
     KNOWN_NAMES = set(field_names)
     SELECTION_OPTIONS = selection_options(app)
     BARE_KEYS = bare_keys(app)
+    print("\ndropdowns whose options could be read: {}".format(
+        ", ".join(sorted(SELECTION_OPTIONS)) or "none - see the definitions below"))
+    if not SELECTION_OPTIONS:
+        dump_field_defs(app)
     counts = {"created": 0, "updated": 0, "unchanged": 0, "skipped": 0,
               "failed": 0, "excluded": 0}
     failures = []
@@ -2050,6 +2159,12 @@ def main():
         # FIELD_MAP, or add them to the application.
         print("the application does not have: {}"
               .format(", ".join(sorted(UNKNOWN_FIELDS))))
+    if RETITLED:
+        print("options could not be read, so these were retitled as a guess:")
+        for field, pairs in sorted(RETITLED.items()):
+            print("  {}: {}".format(field, "; ".join(sorted(pairs))))
+        print("  if a field above is still empty, its options are worded "
+              "differently - put the exact wording in SELECTION_VALUES")
     if FELL_BACK:
         print("no option matched, so the field took its fallback:")
         for field, pairs in sorted(FELL_BACK.items()):
