@@ -298,16 +298,38 @@ SELECTION_VALUES = {
         "mitigated": "Mitigated",
         "undefined": None,
     },
-    # Deliberately empty. CRITICAL, HIGH, MEDIUM, LOW and INFO differ from
-    # Critical, High, Medium, Low and Info only in spelling, so they are
-    # matched against the dropdown's own options and need no entries. Add one
-    # only for a decision - INFO meaning Low, say, on a dropdown with no Info.
-    "severityDropdown": {},
+    # Critical, High, Medium and Low differ from the console's CRITICAL, HIGH,
+    # MEDIUM and LOW only in spelling, so they are matched against the
+    # dropdown's own options and need no entries here. INFO is a different
+    # word from Informational, which no amount of normalising will bridge, so
+    # it is the one entry this dropdown needs.
+    "severityDropdown": {
+        "info": "Informational",
+        "informational": "Informational",
+    },
 }
 
 #: Source values seen that SELECTION_VALUES does not name, reported once at
 #: the end so the dropdown can be extended rather than quietly missing them.
 UNMAPPED_SELECTIONS = {}
+
+#: alert key -> the option to use when nothing else matches, including when
+#: the alert carries no value at all. This is for a dropdown that has an
+#: option for exactly that case: a severity dropdown offering Unknown means an
+#: unplaceable severity belongs in Unknown, not in an empty field, because an
+#: empty dropdown disappears from a report's grouping while Unknown is a row
+#: that can be seen and chased.
+#:
+#: Used only after the table and the spelling match have both failed, and only
+#: when the fallback is itself one of the field's options. Every use is
+#: reported, so a severity the console started sending is still visible rather
+#: than being quietly swept into Unknown.
+SELECTION_FALLBACK = {
+    "severityDropdown": "Unknown",
+}
+
+#: field -> "value -> fallback" for each use of SELECTION_FALLBACK.
+FELL_BACK = {}
 
 #: Alert keys whose field is cleared when the console sends nothing, rather
 #: than keeping what it last held. Everywhere else an empty value means "no
@@ -1590,6 +1612,22 @@ def match_option(value, field):
     return None
 
 
+def fallback_for(key, field, original):
+    """The option to fall back to for this key, or None if there is not one."""
+    wanted = SELECTION_FALLBACK.get(key)
+    if wanted is None:
+        return None
+    options = SELECTION_OPTIONS.get(field) if field else None
+    if options and wanted not in options:
+        # The fallback is not an option either. Sending it would store
+        # nothing, so it is reported alongside the value it was meant to save.
+        BAD_OPTIONS.setdefault(field, set()).add(str(wanted))
+        return None
+    FELL_BACK.setdefault(field or key, set()).add("{} -> {}".format(
+        "(no value)" if original in (None, "") else original, wanted))
+    return wanted
+
+
 def for_selection(key, value, field=None):
     """A selection field's option for this value, or the value unchanged.
 
@@ -1598,7 +1636,11 @@ def for_selection(key, value, field=None):
     evidence, while the record gets the option its dropdown will accept.
     """
     table = SELECTION_VALUES.get(key)
-    if value is None or not (table or SELECTION_OPTIONS.get(field)):
+    if value is None:
+        # An alert with no severity at all still belongs somewhere, if the
+        # field offers a place for it.
+        return fallback_for(key, field, None)
+    if not (table or SELECTION_OPTIONS.get(field)):
         return value
     lowered = str(value).strip().lower()
     if table and lowered in table:
@@ -1623,7 +1665,7 @@ def for_selection(key, value, field=None):
     options = SELECTION_OPTIONS.get(field) if field else None
     if options and value is not None and str(value) not in options:
         BAD_OPTIONS.setdefault(field, set()).add(str(value))
-        return None
+        return fallback_for(key, field, value)
     return value
 
 
@@ -2008,6 +2050,10 @@ def main():
         # FIELD_MAP, or add them to the application.
         print("the application does not have: {}"
               .format(", ".join(sorted(UNKNOWN_FIELDS))))
+    if FELL_BACK:
+        print("no option matched, so the field took its fallback:")
+        for field, pairs in sorted(FELL_BACK.items()):
+            print("  {}: {}".format(field, "; ".join(sorted(pairs))))
     if OPTION_MATCHED:
         print("matched to a dropdown option by spelling:")
         for field, pairs in sorted(OPTION_MATCHED.items()):
