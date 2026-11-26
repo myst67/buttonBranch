@@ -94,6 +94,14 @@ FIELD_MAP = {
     "noteExists": "Note Exists",
     "detectionProduct": "Detection Product",
     "detectionVendor": "Detection Vendor",
+
+    # Who the console has the alert assigned to. assignee is a nested object,
+    # so these come from flatten rather than from the top level - the email is
+    # under assignee.email, not an assigneeEmail field on the alert.
+    "assigneeEmail": ("na.offense-assigned-to", "Offense Assigned To",
+                      "offense-assigned-to"),
+    "assigneeName": ("Assignee Name", "assignee-name"),
+    "assigneeId": ("Assignee Id", "Assignee ID", "assignee-id"),
     "assetId": ("Asset Id", "Asset ID", "asset-id"),
     "assetName": ("Asset Name", "asset-name"),
     "assetCategory": ("Asset Category", "asset-category"),
@@ -288,6 +296,18 @@ SELECTION_VALUES = {
 #: Source values seen that SELECTION_VALUES does not name, reported once at
 #: the end so the dropdown can be extended rather than quietly missing them.
 UNMAPPED_SELECTIONS = {}
+
+#: Alert keys whose field is cleared when the console sends nothing, rather
+#: than keeping what it last held. Everywhere else an empty value means "no
+#: news, leave the field alone", which is right for a timestamp or a hash: it
+#: never changes once set. An assignee does change. An alert handed back to
+#: the queue arrives with assignee null, and a field that only ever gets
+#: written would go on naming the previous owner - so the stale value is worse
+#: than an empty one, and work gets sent to someone who no longer has it.
+#:
+#: Only applied to a record that already exists; a new record simply has
+#: nothing to clear. Remove a key to have that field keep its last value.
+CLEAR_WHEN_EMPTY = {"assigneeEmail", "assigneeName", "assigneeId"}
 
 #: Dropdown options that belong to the analyst, not to SentinelOne. A record
 #: already showing one of these keeps it: the console knows nothing about On
@@ -1557,7 +1577,9 @@ def verify_written(record, values, alert_id):
             # The name is not addressable on the record either: same problem.
             SILENT_FIELDS.add(field)
             continue
-        if sent not in (None, "") and stored in (None, ""):
+        if sent in (None, ""):
+            continue                      # a deliberate blank, not a dropped write
+        if stored in (None, ""):
             SILENT_FIELDS.add(field)
             options = SELECTION_OPTIONS.get(field)
             if options:
@@ -1592,6 +1614,29 @@ def stored(record, candidates):
         except Exception:
             continue
     return None
+
+
+def clear_emptied(record, flat, values, field_names):
+    """Blank the fields in CLEAR_WHEN_EMPTY that the console no longer fills.
+
+    payload_for drops an empty value, which is what keeps a sync from wiping a
+    field the API happens not to return. For the few fields that genuinely go
+    back to empty - the assignee above all - that is wrong, and the record
+    keeps naming a previous owner indefinitely.
+    """
+    cleared = dict(values)
+    for key in CLEAR_WHEN_EMPTY:
+        field = resolve_field(FIELD_MAP.get(key))
+        if not field or field in cleared or field in UNKNOWN_FIELDS:
+            continue
+        if field_names and field not in field_names:
+            continue
+        if flat.get(key) not in (None, "", []):
+            continue                      # the console sent a value; not our case
+        if stored(record, FIELD_MAP.get(key)) in (None, ""):
+            continue                      # already empty, nothing to do
+        cleared[field] = None
+    return cleared
 
 
 def keep_analyst_values(record, values):
@@ -1738,6 +1783,7 @@ def upsert(app, flat, field_names):
     record = existing[0]
     if DETECT_RESPONSE_ON_SYNC:
         values.update(response_values(record, flat, field_names))
+    values = clear_emptied(record, flat, values, field_names)
     values = keep_analyst_values(record, values)
     changed = False
     for field, value in values.items():
