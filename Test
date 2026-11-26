@@ -210,6 +210,53 @@ TI_TAGS = {
 #: script writes. Set to None to leave the field alone.
 TI_TYPE = "SentinelOne SIEM"
 
+#: Values for SELECTION fields, which ignore anything that is not already one
+#: of their options - no error, no value. Keyed by the flattened alert key,
+#: then by the console's value lowercased, giving the option to write.
+#:
+#: A value not listed here is passed through unchanged, so an unexpected status
+#: either matches an option or shows up in the "stored nothing" report rather
+#: than disappearing. Add a dropdown by adding its key: nothing else changes.
+SELECTION_VALUES = {
+    "status": {
+        "new": "New",
+        "in_progress": "In Progress",
+        "inprogress": "In Progress",
+        "resolved": "Resolved",
+        "closed": "Closed",
+        "unresolved": "Unresolved",
+        "mitigated": "Mitigated",
+    },
+    "analystVerdict": {
+        "undefined": None,
+        "true_positive": "True Positive",
+        "false_positive": "False Positive",
+        "suspicious": "Suspicious",
+        "benign": "Benign",
+    },
+    "classification": {
+        "unknown": None,
+        "manual": "Manual",
+        "malware": "Malware",
+        "ransomware": "Ransomware",
+        "pua": "PUA",
+    },
+    "confidenceLevel": {
+        "suspicious": "Suspicious",
+        "malicious": "Malicious",
+    },
+    "result": {
+        "benign": "Benign",
+        "malicious": "Malicious",
+        "mitigated": "Mitigated",
+        "undefined": None,
+    },
+}
+
+#: Source values seen that SELECTION_VALUES does not name, reported once at
+#: the end so the dropdown can be extended rather than quietly missing them.
+UNMAPPED_SELECTIONS = {}
+
 #: Stamp a response time when a sync first sees an alert that has been acted
 #: on, having previously seen it untouched.
 #:
@@ -1286,6 +1333,25 @@ def resolve_field(field):
     return candidates[0] if candidates else None
 
 
+def for_selection(key, value):
+    """A selection field's option for this value, or the value unchanged.
+
+    Translating at write time rather than in flatten keeps the console's own
+    wording in the details field and the discovery listing, where it is the
+    evidence, while the record gets the option its dropdown will accept.
+    """
+    options = SELECTION_VALUES.get(key)
+    if not options or value is None:
+        return value
+    lowered = str(value).strip().lower()
+    if lowered in options:
+        return options[lowered]
+    # Not a value we know. Pass it through - it either matches an option or is
+    # reported as stored-nothing - and note it so the table can be extended.
+    UNMAPPED_SELECTIONS.setdefault(key, set()).add(str(value))
+    return value
+
+
 def payload_for(flat, field_names):
     """The FIELD_MAP pairs this alert can actually fill."""
     values = {}
@@ -1297,6 +1363,7 @@ def payload_for(flat, field_names):
             continue                       # reported by discovery, skipped here
         raw = flat.get(key)
         value = to_datetime(raw) if key in DATE_KEYS else as_text(raw)
+        value = for_selection(key, value)
         if value is not None:
             values[field] = value
     return values
@@ -1508,6 +1575,12 @@ def main():
     if SILENT_FIELDS:
         print("accepted but stored nothing (use the display name, not the key): "
               "{}".format(", ".join(sorted(SILENT_FIELDS))))
+    if UNMAPPED_SELECTIONS:
+        # Written through as-is, so they landed only if the dropdown happens to
+        # carry them. Add them to SELECTION_VALUES, or to the dropdown.
+        print("values with no entry in SELECTION_VALUES:")
+        for key, seen in sorted(UNMAPPED_SELECTIONS.items()):
+            print("  {:<18} {}".format(key, ", ".join(sorted(seen))))
     for line in failures[:20]:
         print("  FAILED {}".format(line))
 
