@@ -72,10 +72,10 @@ FIELD_MAP = {
     "id": "Alert ID",
     "name": "Alert_Name",
     "description": "Alert_Description",
-    "status": "Alert Status",
-    "severity": "Alert Severity",
-    "classification": "Alert Classification",
-    "confidenceLevel": "Confidence Level",
+    "status": ("Alert Status", "alert-status"),
+    "severity": ("Alert Severity", "alert-severity"),
+    "classification": ("Alert Classification", "alert-classification"),
+    "confidenceLevel": ("Confidence Level", "confidence-level"),
     "externalId": "External ID",
     "storylineId": "StoryLine ID",
     "attackSurfaces": "Attack Surfaces",
@@ -1204,9 +1204,10 @@ def describe(alerts, app):
     except Exception as error:
         print("  could not read FilterInput ({})".format(error))
 
-    global KEY_NAMES, KNOWN_NAMES
+    global KEY_NAMES, KNOWN_NAMES, SELECTION_OPTIONS
     KEY_NAMES = key_to_name(app)
     KNOWN_NAMES = set(app_field_names(app))
+    SELECTION_OPTIONS = selection_options(app)
 
     print("\n=== fields on '{}' (display name <- key) ===".format(app_name))
     pairs = field_pairs(app)
@@ -1217,6 +1218,26 @@ def describe(alerts, app):
               "right is accepted by records.create and silently ignored.")
     else:
         print("  could not read the field list from this SDK version")
+    print("\n=== dropdowns, and the options they will accept ===")
+    if SELECTION_OPTIONS:
+        for name in sorted(SELECTION_OPTIONS):
+            print("  {:<26} {}".format(name, ", ".join(SELECTION_OPTIONS[name])))
+        print("  SELECTION_VALUES must map each SentinelOne value to one of "
+              "these, spelled exactly. A dropdown stores nothing else.")
+        for key, table in sorted(SELECTION_VALUES.items()):
+            field = resolve_field(FIELD_MAP.get(key))
+            options = SELECTION_OPTIONS.get(field)
+            if not options:
+                continue
+            wrong = sorted({v for v in table.values()
+                            if v is not None and str(v) not in options})
+            if wrong:
+                print("  {} -> {}: not options: {}".format(
+                    key, field, ", ".join(wrong)))
+    else:
+        print("  this SDK version does not report a field's options; the "
+              "wording has to come from the application builder")
+
     names = app_field_names(app)
 
     if names:
@@ -1274,6 +1295,50 @@ def app_field_names(app):
     return sorted({name for name, _ in field_pairs(app) if name})
 
 
+def selection_options(app):
+    """Display name -> option list, for every selection field on the app.
+
+    A selection field carries its own set of allowed values, and that set is
+    the only thing it will store. Reading it here means a mismatch between
+    SELECTION_VALUES and the dropdown is reported with both lists side by
+    side, rather than showing up as an empty field weeks later.
+    """
+    found = {}
+    for attribute in ("field_definitions", "fields"):
+        value = getattr(app, attribute, None)
+        if isinstance(value, dict):
+            definitions = [(name, d) for name, d in value.items()]
+        elif isinstance(value, (list, tuple)):
+            definitions = [(None, d) for d in value]
+        else:
+            continue
+        for name, definition in definitions:
+            if isinstance(definition, dict):
+                name = name or definition.get("name")
+                raw = definition.get("values") or definition.get("options")
+            else:
+                name = name or getattr(definition, "name", None)
+                raw = (getattr(definition, "values", None)
+                       or getattr(definition, "options", None))
+            if not name or not isinstance(raw, (list, tuple)) or not raw:
+                continue
+            options = []
+            for option in raw:
+                if isinstance(option, dict):
+                    text = option.get("name") or option.get("value")
+                elif isinstance(option, str):
+                    text = option
+                else:
+                    text = getattr(option, "name", None)
+                if text:
+                    options.append(str(text))
+            if options:
+                found[str(name)] = options
+        if found:
+            return found
+    return found
+
+
 def key_to_name(app):
     """Field key -> display name, so either can be used in FIELD_MAP."""
     mapping = {}
@@ -1302,6 +1367,18 @@ KEY_NAMES = {}
 #: Every display name on the application, so a candidate can be checked before
 #: it is sent rather than after it has been silently dropped.
 KNOWN_NAMES = set()
+
+#: Display name -> the options a selection field will accept, read from the
+#: application. A dropdown takes nothing else: hand it a value that is not on
+#: its list and it stores nothing and says nothing, which is how Sev Tag came
+#: to read Low for every alert. Empty when the SDK does not report options,
+#: and then no check is made.
+SELECTION_OPTIONS = {}
+
+#: Field -> values SELECTION_VALUES produced that the dropdown does not carry.
+#: These would be dropped silently, so they are named at the end of the run
+#: together with the options that do exist.
+BAD_OPTIONS = {}
 
 
 def _one_field(field):
@@ -1333,22 +1410,28 @@ def resolve_field(field):
     return candidates[0] if candidates else None
 
 
-def for_selection(key, value):
+def for_selection(key, value, field=None):
     """A selection field's option for this value, or the value unchanged.
 
     Translating at write time rather than in flatten keeps the console's own
     wording in the details field and the discovery listing, where it is the
     evidence, while the record gets the option its dropdown will accept.
     """
-    options = SELECTION_VALUES.get(key)
-    if not options or value is None:
+    table = SELECTION_VALUES.get(key)
+    if not table or value is None:
         return value
     lowered = str(value).strip().lower()
-    if lowered in options:
-        return options[lowered]
-    # Not a value we know. Pass it through - it either matches an option or is
-    # reported as stored-nothing - and note it so the table can be extended.
-    UNMAPPED_SELECTIONS.setdefault(key, set()).add(str(value))
+    if lowered in table:
+        value = table[lowered]
+    else:
+        # Not a value we know. Pass it through - it either matches an option or
+        # is reported as stored-nothing - and note it so the table can grow.
+        UNMAPPED_SELECTIONS.setdefault(key, set()).add(str(value))
+    # The dropdown has the last word. Checking before the write turns a field
+    # that would quietly stay empty into a line naming both sides.
+    options = SELECTION_OPTIONS.get(field) if field else None
+    if options and value is not None and str(value) not in options:
+        BAD_OPTIONS.setdefault(field, set()).add(str(value))
     return value
 
 
@@ -1363,7 +1446,7 @@ def payload_for(flat, field_names):
             continue                       # reported by discovery, skipped here
         raw = flat.get(key)
         value = to_datetime(raw) if key in DATE_KEYS else as_text(raw)
-        value = for_selection(key, value)
+        value = for_selection(key, value, field)
         if value is not None:
             values[field] = value
     return values
@@ -1537,10 +1620,11 @@ def main():
               "the lists above, set DISCOVERY = False, and run again.")
         return {"mode": "discovery", "alerts_seen": len(alerts)}
 
-    global KEY_NAMES, KNOWN_NAMES
+    global KEY_NAMES, KNOWN_NAMES, SELECTION_OPTIONS
     KEY_NAMES = key_to_name(app)
     field_names = app_field_names(app)
     KNOWN_NAMES = set(field_names)
+    SELECTION_OPTIONS = selection_options(app)
     counts = {"created": 0, "updated": 0, "unchanged": 0, "skipped": 0,
               "failed": 0, "excluded": 0}
     failures = []
@@ -1581,12 +1665,21 @@ def main():
         print("values with no entry in SELECTION_VALUES:")
         for key, seen in sorted(UNMAPPED_SELECTIONS.items()):
             print("  {:<18} {}".format(key, ", ".join(sorted(seen))))
+    if BAD_OPTIONS:
+        # These were sent and dropped. Both lists are printed because the fix
+        # is either a spelling change on the left or a new option on the right.
+        print("sent values the dropdown does not carry (stored nothing):")
+        for field, seen in sorted(BAD_OPTIONS.items()):
+            print("  {}: sent {}".format(field, ", ".join(sorted(seen))))
+            print("  {}  accepts {}".format(
+                " " * len(field), ", ".join(SELECTION_OPTIONS.get(field, []))))
     for line in failures[:20]:
         print("  FAILED {}".format(line))
 
     result = {"mode": "sync", "alerts_seen": len(alerts), "failures": failures[:20],
               "unknown_fields": sorted(UNKNOWN_FIELDS),
               "silent_fields": sorted(SILENT_FIELDS),
+              "bad_options": {f: sorted(v) for f, v in BAD_OPTIONS.items()},
               "excluded_by": excluded_by}
     result.update(counts)
     return result
